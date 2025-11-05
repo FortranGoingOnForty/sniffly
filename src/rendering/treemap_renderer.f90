@@ -598,6 +598,7 @@ contains
     type(c_ptr), intent(in) :: cr
     type(file_node), intent(in) :: node
     real(c_double) :: x, y, w, h
+    logical :: can_show_label
 
     ! Don't render tiny rectangles
     if (node%bounds%width < 2 .or. node%bounds%height < 2) return
@@ -606,6 +607,9 @@ contains
     y = real(node%bounds%y, c_double)
     w = real(node%bounds%width, c_double)
     h = real(node%bounds%height, c_double)
+
+    ! Check if we can show a full label
+    can_show_label = (w >= 50.0d0 .and. h >= 20.0d0)
 
     ! Fill rectangle with color
     call cairo_set_source_rgb(cr, node%color%r, node%color%g, node%color%b)
@@ -619,8 +623,43 @@ contains
     call cairo_stroke(cr)
 
     ! Render text label if rectangle is large enough
-    call render_label(cr, node, x, y, w, h)
+    if (can_show_label) then
+      call render_label(cr, node, x, y, w, h)
+    else if (w >= 10.0d0 .and. h >= 10.0d0) then
+      ! Show "..." for rectangles too small for full labels
+      call render_ellipsis(cr, x, y, w, h)
+    else if (w >= 2.0d0 .and. h >= 2.0d0) then
+      ! Debug: print info about unlabeled rectangles
+      if (allocated(node%name)) then
+        print *, "Unlabeled rect: ", trim(node%name), " size=", w, "x", h
+      else
+        print *, "Unlabeled rect: (no name) size=", w, "x", h
+      end if
+    end if
   end subroutine render_node
+
+  ! Render ellipsis for small rectangles
+  subroutine render_ellipsis(cr, x, y, w, h)
+    type(c_ptr), intent(in) :: cr
+    real(c_double), intent(in) :: x, y, w, h
+    real(c_double) :: font_size, text_x, text_y
+
+    ! Small font for ellipsis
+    font_size = min(h * 0.5d0, 12.0d0)
+    if (font_size < 6.0d0) return
+
+    call cairo_select_font_face(cr, "Sans"//c_null_char, 0_c_int, 0_c_int)
+    call cairo_set_font_size(cr, font_size)
+
+    ! Center the ellipsis
+    text_x = x + w / 2.0d0 - font_size * 0.5d0
+    text_y = y + h / 2.0d0 + font_size * 0.3d0
+
+    ! Draw with contrast
+    call cairo_set_source_rgb(cr, 1.0d0, 1.0d0, 1.0d0)
+    call cairo_move_to(cr, text_x, text_y)
+    call cairo_show_text(cr, "..."//c_null_char)
+  end subroutine render_ellipsis
 
   ! Format file size in human-readable format
   function format_size(size_bytes) result(size_str)

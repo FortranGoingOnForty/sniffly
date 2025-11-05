@@ -11,6 +11,10 @@ module disk_scanner
   character(len=*), parameter, dimension(7) :: SKIP_DIRS = &
     [character(len=20) :: '.git', '.svn', '.hg', 'node_modules', '__pycache__', 'build', '.claude']
 
+  ! Small file grouping thresholds
+  real, parameter :: SMALL_FILE_THRESHOLD = 0.005  ! 0.5% of parent size
+  integer, parameter :: MIN_SMALL_FILES = 10        ! Minimum count to trigger grouping
+
 contains
 
   ! Check if directory should be skipped
@@ -27,6 +31,113 @@ contains
       end if
     end do
   end function should_skip_dir
+
+  ! Group small files into a synthetic node
+  ! This modifies node%children in-place if grouping occurs
+  subroutine group_small_files(node)
+    type(file_node), intent(inout) :: node
+    integer(int64) :: total_size, threshold_size, small_total
+    integer :: i, small_count, large_count
+    type(file_node), dimension(:), allocatable :: new_children
+    integer :: large_idx, small_idx
+    character(len=50) :: count_str
+
+    ! Only group files in directories with children
+    if (.not. node%is_directory .or. .not. allocated(node%children)) return
+    if (node%num_children < MIN_SMALL_FILES) return
+
+    ! Calculate total size of all children
+    total_size = 0_int64
+    do i = 1, node%num_children
+      total_size = total_size + node%children(i)%size
+    end do
+
+    ! Calculate threshold (0.5% of total)
+    threshold_size = int(real(total_size) * SMALL_FILE_THRESHOLD, int64)
+
+    ! Count small files
+    small_count = 0
+    small_total = 0_int64
+    do i = 1, node%num_children
+      if (node%children(i)%size < threshold_size) then
+        small_count = small_count + 1
+        small_total = small_total + node%children(i)%size
+      end if
+    end do
+
+    ! Only group if we have enough small files
+    if (small_count < MIN_SMALL_FILES) return
+
+    large_count = node%num_children - small_count
+    print *, "Grouping ", small_count, " small files in: ", trim(node%name)
+
+    ! Allocate new children array: large files + 1 synthetic node
+    allocate(new_children(large_count + 1))
+
+    ! Copy large files and build small files array
+    large_idx = 0
+    small_idx = 0
+
+    ! First pass: collect large files
+    do i = 1, node%num_children
+      if (node%children(i)%size >= threshold_size) then
+        large_idx = large_idx + 1
+        ! Transfer ownership using move_alloc
+        call move_file_node(node%children(i), new_children(large_idx))
+      end if
+    end do
+
+    ! Create synthetic node for small files
+    large_idx = large_idx + 1  ! This is where synthetic node goes
+    new_children(large_idx)%is_directory = .true.
+    new_children(large_idx)%access_denied = .false.
+    new_children(large_idx)%size = small_total
+    new_children(large_idx)%num_children = small_count
+
+    ! Format name with count
+    write(count_str, '(A,I0,A)') "[", small_count, " small files]"
+    new_children(large_idx)%name = trim(count_str)
+    new_children(large_idx)%path = trim(node%path) // get_path_separator() // trim(count_str)
+
+    ! Allocate children for synthetic node
+    allocate(new_children(large_idx)%children(small_count))
+
+    ! Second pass: collect small files into synthetic node
+    small_idx = 0
+    do i = 1, node%num_children
+      if (node%children(i)%size < threshold_size) then
+        small_idx = small_idx + 1
+        call move_file_node(node%children(i), new_children(large_idx)%children(small_idx))
+      end if
+    end do
+
+    ! Replace old children array with new one
+    if (allocated(node%children)) deallocate(node%children)
+    call move_alloc(new_children, node%children)
+    node%num_children = large_count + 1
+
+  end subroutine group_small_files
+
+  ! Helper to move a file_node without deep copying
+  subroutine move_file_node(from, to)
+    type(file_node), intent(inout) :: from, to
+
+    ! Move allocatable components
+    if (allocated(from%name)) call move_alloc(from%name, to%name)
+    if (allocated(from%path)) call move_alloc(from%path, to%path)
+    if (allocated(from%children)) call move_alloc(from%children, to%children)
+
+    ! Copy simple components
+    to%size = from%size
+    to%is_directory = from%is_directory
+    to%access_denied = from%access_denied
+    to%num_children = from%num_children
+    to%bounds = from%bounds
+    to%color = from%color
+    to%cushion = from%cushion
+    to%is_selected = from%is_selected
+    to%is_hovered = from%is_hovered
+  end subroutine move_file_node
 
   ! Scan a directory and build a file tree (with optional depth limiting)
   recursive subroutine scan_directory(path, node, current_depth)
@@ -111,6 +222,9 @@ contains
           node%size = node%size + node%children(i)%size
         end do
       end if
+
+      ! Group small files into synthetic node if applicable
+      call group_small_files(node)
 
       ! Deallocate entries array
       if (allocated(entries)) deallocate(entries)
