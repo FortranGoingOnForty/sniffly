@@ -68,11 +68,12 @@ c_sources = [
 core_sources = [
   'src/core/types.f90',           # Must be first (no dependencies)
   'src/core/file_system.f90',     # Depends on types
+  'src/core/disk_scanner.f90',    # Depends on types, file_system
 ]
 
 layout_sources = [
-  # Layout algorithms (will add later)
-  # 'src/layout/squarified.f90',
+  # Layout algorithms
+  'src/layout/squarified.f90',    # Depends on types
   # 'src/layout/cushioned.f90',
   # 'src/layout/layout_manager.f90',
 ]
@@ -89,8 +90,8 @@ gui_sources = [
 ]
 
 rendering_sources = [
-  # Cairo rendering (will add later)
-  # 'src/rendering/cairo_renderer.f90',
+  # Cairo rendering
+  'src/rendering/treemap_renderer.f90',  # Depends on types, disk_scanner, squarified_layout, cairo
   # 'src/rendering/colors.f90',
   # 'src/rendering/text_layout.f90',
   # 'src/rendering/effects.f90',
