@@ -15,7 +15,8 @@ module treemap_renderer
 
   public :: scan_and_render, init_renderer, get_root_node, scan_and_render_with_hover, &
             scan_and_render_with_interaction, find_node_at_position, navigate_into_node, &
-            navigate_up, get_breadcrumb_path, get_path_depth
+            navigate_up, get_breadcrumb_path, get_path_depth, get_node_count, &
+            get_node_center_by_index
 
   ! Global state
   type(file_node), save, target :: root_node
@@ -363,6 +364,37 @@ contains
     end do
   end subroutine get_breadcrumb_path
 
+  ! Get number of visible nodes in current view
+  function get_node_count() result(count)
+    integer :: count
+
+    if (associated(current_view_node)) then
+      count = current_view_node%num_children
+    else
+      count = 0
+    end if
+  end function get_node_count
+
+  ! Get center coordinates of a node by index (for keyboard navigation)
+  subroutine get_node_center_by_index(index, center_x, center_y, success)
+    integer, intent(in) :: index
+    real(c_double), intent(out) :: center_x, center_y
+    logical, intent(out) :: success
+
+    success = .false.
+
+    if (.not. associated(current_view_node)) return
+    if (index < 1 .or. index > current_view_node%num_children) return
+
+    ! Get the node's bounds and calculate center
+    center_x = real(current_view_node%children(index)%bounds%x, c_double) + &
+               real(current_view_node%children(index)%bounds%width, c_double) / 2.0d0
+    center_y = real(current_view_node%children(index)%bounds%y, c_double) + &
+               real(current_view_node%children(index)%bounds%height, c_double) / 2.0d0
+
+    success = .true.
+  end subroutine get_node_center_by_index
+
   ! Render hover highlight overlay
   subroutine render_hover_highlight(cr, node)
     type(c_ptr), intent(in) :: cr
@@ -410,13 +442,13 @@ contains
     call cairo_stroke(cr)
   end subroutine render_selection_highlight
 
-  ! Assign colors based on depth and file type
+  ! Assign colors based on depth, file type, and sibling index for variation
   recursive subroutine color_tree(node, depth)
     use iso_fortran_env, only: real64
     type(file_node), intent(inout) :: node
     integer, intent(in) :: depth
     integer :: i
-    real(real64) :: hue
+    real(real64) :: hue, hue_offset
 
     ! Color based on depth (alternating hues)
     hue = mod(depth * 60.0, 360.0)  ! 0, 60, 120, 180, 240, 300
@@ -429,9 +461,20 @@ contains
       node%color = hsv_to_rgb(hue + 30.0, 0.5d0, 0.9d0)
     end if
 
-    ! Recurse to children
+    ! Recurse to children with varying hues for siblings
     if (allocated(node%children)) then
       do i = 1, node%num_children
+        ! Calculate hue offset based on sibling index (spread across 360 degrees)
+        hue_offset = real(mod(i * 37, 360), real64)  ! 37 is prime for good distribution
+
+        ! Apply variation to child
+        if (node%children(i)%is_directory) then
+          node%children(i)%color = hsv_to_rgb(hue + hue_offset, 0.6d0, 0.8d0)
+        else
+          node%children(i)%color = hsv_to_rgb(hue + hue_offset + 30.0, 0.5d0, 0.9d0)
+        end if
+
+        ! Recurse with increased depth
         call color_tree(node%children(i), depth + 1)
       end do
     end if
@@ -570,6 +613,17 @@ contains
     ! Position text (top-left with small padding)
     text_x = x + 4.0d0
     text_y = y + font_size + 2.0d0
+
+    ! Draw semi-transparent dark background behind text for contrast
+    call cairo_set_source_rgba(cr, 0.0d0, 0.0d0, 0.0d0, 0.7d0)  ! Black with 70% opacity
+    if (h > 40) then
+      ! Taller background for two lines
+      call cairo_rectangle(cr, x + 2.0d0, y + 2.0d0, w - 4.0d0, font_size * 2.5d0 + 6.0d0)
+    else
+      ! Single line background
+      call cairo_rectangle(cr, x + 2.0d0, y + 2.0d0, w - 4.0d0, font_size + 6.0d0)
+    end if
+    call cairo_fill(cr)
 
     ! Draw name with white color for visibility
     call cairo_set_source_rgb(cr, 1.0d0, 1.0d0, 1.0d0)

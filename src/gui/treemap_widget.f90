@@ -11,11 +11,21 @@ module treemap_widget
   implicit none
   private
 
-  public :: create_treemap_widget, set_scan_path, get_widget_ptr
+  public :: create_treemap_widget, set_scan_path, get_widget_ptr, register_navigation_callback
+
+  ! Callback interface for navigation events
+  abstract interface
+    subroutine navigation_callback()
+    end subroutine navigation_callback
+  end interface
 
   ! GDK Key constants
   integer(c_int), parameter :: GDK_KEY_Return = 65293_c_int      ! Enter key
   integer(c_int), parameter :: GDK_KEY_BackSpace = 65288_c_int   ! Backspace key
+  integer(c_int), parameter :: GDK_KEY_Left = 65361_c_int        ! Left arrow
+  integer(c_int), parameter :: GDK_KEY_Right = 65363_c_int       ! Right arrow
+  integer(c_int), parameter :: GDK_KEY_Up = 65362_c_int          ! Up arrow
+  integer(c_int), parameter :: GDK_KEY_Down = 65364_c_int        ! Down arrow
 
   ! Widget state (will expand later)
   type(c_ptr), save :: widget_ptr = c_null_ptr
@@ -25,8 +35,15 @@ module treemap_widget
   real(c_double), save :: mouse_x = -1.0_c_double
   real(c_double), save :: mouse_y = -1.0_c_double
 
+  ! Keyboard/Mouse hover mode
+  logical, save :: keyboard_mode = .false.  ! True when using keyboard navigation
+  integer, save :: keyboard_hover_index = 0  ! Index of keyboard-hovered node
+
   ! Selection state
   integer, save :: selected_index = 0  ! 0 = no selection
+
+  ! Navigation callback (called when user navigates)
+  procedure(navigation_callback), pointer, save :: nav_callback => null()
 
 contains
 
@@ -92,6 +109,13 @@ contains
     print *, "Scan path set to: ", trim(scan_path)
   end subroutine set_scan_path
 
+  ! Register a callback to be called when navigation occurs
+  subroutine register_navigation_callback(callback)
+    procedure(navigation_callback) :: callback
+    nav_callback => callback
+    print *, "Navigation callback registered"
+  end subroutine register_navigation_callback
+
   ! Motion callback - track mouse position for hover
   subroutine on_motion(controller, x, y, user_data) bind(c)
     type(c_ptr), value :: controller, user_data
@@ -100,6 +124,9 @@ contains
     ! Update mouse position
     mouse_x = x
     mouse_y = y
+
+    ! Switch to mouse mode (mouse takes over from keyboard)
+    keyboard_mode = .false.
 
     ! Trigger redraw to show hover effect
     if (c_associated(widget_ptr)) then
@@ -126,7 +153,10 @@ contains
         call navigate_into_node(clicked_index)
         selected_index = 0  ! Clear selection after navigation
 
-        ! Note: Breadcrumbs will be updated on next redraw
+        ! Call navigation callback to update breadcrumbs
+        if (associated(nav_callback)) then
+          call nav_callback()
+        end if
       else
         ! Single click: just select
         selected_index = clicked_index
@@ -151,6 +181,7 @@ contains
     integer(c_int), value :: width, height
 
     ! Render the actual treemap with hover and selection
+    ! mouse_x and mouse_y are updated by both mouse motion and arrow keys
     if (len_trim(scan_path) > 0) then
       call scan_and_render_with_interaction(cr, width, height, mouse_x, mouse_y, &
                                              selected_index, trim(scan_path))
@@ -160,48 +191,118 @@ contains
                                              selected_index)
     end if
 
-    ! TODO: Update breadcrumbs (need callback mechanism to avoid circular dependency)
-
     print *, "Rendered treemap: ", width, "x", height
   end subroutine on_draw
 
-  ! Keyboard callback - handle Backspace (up) and Enter (navigate in)
+  ! Keyboard callback - handle all keyboard navigation
   function on_key_press(controller, keyval, keycode, state, user_data) bind(c) result(handled)
-    use treemap_renderer, only: navigate_up, navigate_into_node
+    use treemap_renderer, only: navigate_up, navigate_into_node, get_node_count, get_node_center_by_index
     type(c_ptr), value :: controller, user_data
     integer(c_int), value :: keyval, keycode, state
     integer(c_int) :: handled
+    integer :: node_count
+    logical :: success
 
     handled = 0_c_int  ! Default: not handled
 
-    ! Backspace: Navigate up one level
-    if (keyval == GDK_KEY_BackSpace) then
-      print *, "Backspace pressed - navigating up"
-      call navigate_up(1)  ! Go up one level
+    ! Arrow keys: Navigate through nodes
+    if (keyval == GDK_KEY_Left .or. keyval == GDK_KEY_Right .or. &
+        keyval == GDK_KEY_Up .or. keyval == GDK_KEY_Down) then
+
+      keyboard_mode = .true.  ! Switch to keyboard mode
+
+      ! Get number of visible nodes
+      node_count = get_node_count()
+
+      if (node_count > 0) then
+        ! Initialize keyboard hover if needed
+        if (keyboard_hover_index == 0) then
+          keyboard_hover_index = 1
+        else
+          ! Move keyboard hover based on arrow key
+          if (keyval == GDK_KEY_Right .or. keyval == GDK_KEY_Down) then
+            keyboard_hover_index = keyboard_hover_index + 1
+            if (keyboard_hover_index > node_count) keyboard_hover_index = 1  ! Wrap around
+          else if (keyval == GDK_KEY_Left .or. keyval == GDK_KEY_Up) then
+            keyboard_hover_index = keyboard_hover_index - 1
+            if (keyboard_hover_index < 1) keyboard_hover_index = node_count  ! Wrap around
+          end if
+        end if
+
+        ! Update mouse position to match keyboard hover for seamless transition
+        call get_node_center_by_index(keyboard_hover_index, mouse_x, mouse_y, success)
+        if (success) then
+          print *, "Arrow key - keyboard hover index: ", keyboard_hover_index, " at (", mouse_x, ",", mouse_y, ")"
+        else
+          print *, "Arrow key - failed to get node center for index: ", keyboard_hover_index
+        end if
+      end if
 
       ! Trigger redraw
       if (c_associated(widget_ptr)) then
         call gtk_widget_queue_draw(widget_ptr)
       end if
 
-      handled = 1_c_int  ! Handled
+      handled = 1_c_int
 
-    ! Enter: Navigate into selected directory
-    else if (keyval == GDK_KEY_Return) then
-      if (selected_index > 0) then
-        print *, "Enter pressed - navigating into selected node: ", selected_index
-        call navigate_into_node(selected_index)
-        selected_index = 0  ! Clear selection after navigation
+    ! Backspace: Navigate up one level
+    else if (keyval == GDK_KEY_BackSpace) then
+      print *, "Backspace pressed - navigating up"
+      call navigate_up(1)
 
-        ! Trigger redraw
-        if (c_associated(widget_ptr)) then
-          call gtk_widget_queue_draw(widget_ptr)
-        end if
+      ! Reset keyboard hover
+      keyboard_hover_index = 0
+      keyboard_mode = .false.
 
-        handled = 1_c_int  ! Handled
-      else
-        print *, "Enter pressed but nothing selected"
+      ! Call navigation callback to update breadcrumbs
+      if (associated(nav_callback)) then
+        call nav_callback()
       end if
+
+      ! Trigger redraw
+      if (c_associated(widget_ptr)) then
+        call gtk_widget_queue_draw(widget_ptr)
+      end if
+
+      handled = 1_c_int
+
+    ! Enter: Two-stage behavior
+    else if (keyval == GDK_KEY_Return) then
+      if (keyboard_mode .and. keyboard_hover_index > 0) then
+        ! First Enter: Select the keyboard-hovered item
+        if (selected_index /= keyboard_hover_index) then
+          selected_index = keyboard_hover_index
+          print *, "Enter pressed - selected keyboard hover: ", selected_index
+        else
+          ! Second Enter: Navigate into selected item
+          print *, "Enter pressed again - navigating into: ", selected_index
+          call navigate_into_node(selected_index)
+          selected_index = 0
+          keyboard_hover_index = 0
+
+          ! Call navigation callback
+          if (associated(nav_callback)) then
+            call nav_callback()
+          end if
+        end if
+      else if (selected_index > 0) then
+        ! Enter on mouse-selected item: navigate immediately
+        print *, "Enter pressed - navigating into selected: ", selected_index
+        call navigate_into_node(selected_index)
+        selected_index = 0
+
+        ! Call navigation callback
+        if (associated(nav_callback)) then
+          call nav_callback()
+        end if
+      end if
+
+      ! Trigger redraw
+      if (c_associated(widget_ptr)) then
+        call gtk_widget_queue_draw(widget_ptr)
+      end if
+
+      handled = 1_c_int
     end if
 
   end function on_key_press
