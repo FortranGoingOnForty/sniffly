@@ -1,0 +1,76 @@
+# Fortran compiled files
+*.o
+*.mod
+*.smod
+*.a
+*.so
+*.dylib
+
+# Executables
+sniffly
+*.exe
+*.out
+
+# Build directories
+/build/
+/builddir/
+/_build/
+
+# Meson
+meson-logs/
+meson-private/
+compile_commands.json
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Testing
+test_output/
+*.log
+
+# Documentation builds
+/docs/_build/
+/docs/html/
+/docs/latex/
+
+# Package files
+*.deb
+*.rpm
+*.dmg
+*.pkg
+*.tar.gz
+*.zip
+
+# Temporary files
+*.tmp
+*.bak
+*.orig
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon?
+
+# Linux
+*~
+.directory
+
+# gtk-fortran build artifacts
+gtk-fortran/
+
+# Debug files
+*.dSYM/
+vgcore.*
+core
+core.*
+
+# Coverage
+*.gcda
+*.gcno
+*.gcov
