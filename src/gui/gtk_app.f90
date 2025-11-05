@@ -211,21 +211,63 @@ contains
     use treemap_renderer, only: get_breadcrumb_path, get_path_depth
     character(len=256), dimension(100) :: names
     character(len=2048) :: path_str
-    integer :: count, i
+    character(len=512) :: home_dir
+    integer :: count, i, home_len, name_len
+    logical :: is_home_path
 
-    if (.not. c_associated(breadcrumb_label_ptr)) return
+    if (.not. c_associated(breadcrumb_label_ptr)) then
+      print *, "WARNING: breadcrumb_label_ptr not associated!"
+      return
+    end if
 
     ! Get breadcrumb path from renderer
     call get_breadcrumb_path(names, count)
+    print *, "Updating breadcrumbs: count=", count
 
-    ! Build path string with " > " separators
+    ! Get home directory from environment
+    call get_environment_variable("HOME", home_dir)
+    home_len = len_trim(home_dir)
+
+    ! Build path string with "/" separators
     path_str = ""
     do i = 1, count
       if (i > 1) then
-        path_str = trim(path_str) // " > "
+        path_str = trim(path_str) // "/"
       end if
-      path_str = trim(path_str) // trim(names(i))
+
+      ! Check if this is the first element and starts with home directory
+      if (i == 1 .and. home_len > 0) then
+        name_len = len_trim(names(i))
+        is_home_path = .false.
+
+        ! Check if path starts with home directory
+        if (name_len >= home_len) then
+          if (names(i)(1:home_len) == home_dir(1:home_len)) then
+            is_home_path = .true.
+          end if
+        end if
+
+        if (is_home_path) then
+          ! Replace home directory with ~
+          if (name_len == home_len) then
+            ! Exactly the home directory
+            path_str = trim(path_str) // "~"
+          else if (names(i)(home_len+1:home_len+1) == "/") then
+            ! Home directory with subdirectory
+            path_str = trim(path_str) // "~" // trim(names(i)(home_len+1:name_len))
+          else
+            ! Path contains home but isn't a direct child
+            path_str = trim(path_str) // trim(names(i))
+          end if
+        else
+          path_str = trim(path_str) // trim(names(i))
+        end if
+      else
+        path_str = trim(path_str) // trim(names(i))
+      end if
     end do
+
+    print *, "Breadcrumb path: ", trim(path_str)
 
     ! Update label
     call gtk_label_set_text(breadcrumb_label_ptr, trim(path_str)//c_null_char)

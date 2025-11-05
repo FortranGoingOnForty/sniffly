@@ -6,19 +6,22 @@ module squarified_layout
 
   public :: calculate_treemap
 
-  ! Size adjustment parameter (0.85 = subtle compression, 1.0 = no adjustment)
-  real(real64), parameter :: SIZE_POWER = 0.85d0
-
 contains
 
-  ! Calculate treemap layout using squarified algorithm
+  ! Calculate treemap layout using alternating slice-and-dice (creates spiral effect)
   recursive subroutine calculate_treemap(node, bounds)
     type(file_node), intent(inout) :: node
     type(rect), intent(in) :: bounds
-    type(rect) :: child_container
-    integer :: i, j
-    integer(int64), allocatable :: adjusted_sizes(:)
-    integer(int64) :: adjusted_total
+
+    call calculate_treemap_internal(node, bounds, 0)
+  end subroutine calculate_treemap
+
+  ! Internal recursive function with depth tracking
+  recursive subroutine calculate_treemap_internal(node, bounds, depth)
+    type(file_node), intent(inout) :: node
+    type(rect), intent(in) :: bounds
+    integer, intent(in) :: depth
+    integer :: i
 
     ! Set this node's bounds
     node%bounds = bounds
@@ -30,56 +33,171 @@ contains
 
     if (node%size == 0) return
 
-    ! Temporarily adjust sizes for better visibility, then restore
-    allocate(adjusted_sizes(node%num_children))
-
-    ! Sort children by size (descending) for better aspect ratios
+    ! Sort children by size (descending) for spiral effect
     call sort_by_size(node%children, node%num_children)
 
-    ! Temporarily replace sizes with adjusted sizes for layout
-    do i = 1, node%num_children
-      adjusted_sizes(i) = node%children(i)%size ! Save original
-      node%children(i)%size = int(real(node%children(i)%size, real64) ** SIZE_POWER, int64)
-      if (node%children(i)%size == 0) node%children(i)%size = 1
-    end do
-
-    ! Calculate adjusted total
-    adjusted_total = 0
-    do i = 1, node%num_children
-      adjusted_total = adjusted_total + node%children(i)%size
-    end do
-
-    ! Layout children using squarified algorithm with RELATIVE coordinates
-    child_container%x = 0
-    child_container%y = 0
-    child_container%width = bounds%width
-    child_container%height = bounds%height
-    call squarify(node%children, node%num_children, child_container, adjusted_total)
-
-    ! Restore original sizes
-    do i = 1, node%num_children
-      node%children(i)%size = adjusted_sizes(i)
-    end do
-
-    deallocate(adjusted_sizes)
-
-    ! Offset all children by this node's position (convert relative to absolute)
-    do i = 1, node%num_children
-      node%children(i)%bounds%x = node%children(i)%bounds%x + bounds%x
-      node%children(i)%bounds%y = node%children(i)%bounds%y + bounds%y
-    end do
+    ! Layout children using alternating slice-and-dice
+    call slice_and_dice(node%children, node%num_children, bounds, node%size, depth)
 
     ! Recursively layout each child's children
-    do j = 1, node%num_children
-      if (allocated(node%children(j)%children)) then
-        ! Pass child's bounds (now in absolute coordinates) for recursive layout
-        call calculate_treemap(node%children(j), node%children(j)%bounds)
+    do i = 1, node%num_children
+      if (allocated(node%children(i)%children)) then
+        ! Pass child's bounds and increment depth for alternating direction
+        call calculate_treemap_internal(node%children(i), node%children(i)%bounds, depth + 1)
       end if
     end do
-  end subroutine calculate_treemap
+  end subroutine calculate_treemap_internal
 
-  ! Squarified treemap layout algorithm (Bruls et al.)
-  recursive subroutine squarify(nodes, num_nodes, bounds, total_size)
+  ! Recursive spiral layout - creates fibonacci-like spiral pattern
+  ! Takes largest items and gives them dominant space, recursively subdivides remainder
+  recursive subroutine slice_and_dice(nodes, num_nodes, bounds, total_size, depth)
+    type(file_node), dimension(:), intent(inout) :: nodes
+    integer, intent(in) :: num_nodes
+    type(rect), intent(in) :: bounds
+    integer(int64), intent(in) :: total_size
+    integer, intent(in) :: depth
+    integer :: pivot_count, i
+    integer(int64) :: pivot_size, remaining_size
+    type(rect) :: pivot_area, remaining_area
+    real(real64) :: size_ratio
+    logical :: split_horizontal
+
+    if (num_nodes == 0 .or. total_size == 0) return
+    if (bounds%width <= 0 .or. bounds%height <= 0) return
+
+    ! Base case: single item gets full bounds
+    if (num_nodes == 1) then
+      nodes(1)%bounds = bounds
+      return
+    end if
+
+    ! Base case: very small area, just stack items
+    if (bounds%width < 30 .or. bounds%height < 30) then
+      call simple_stack(nodes, num_nodes, bounds, total_size, bounds%width >= bounds%height)
+      return
+    end if
+
+    ! Determine split direction based on aspect ratio (prefer squarish splits)
+    split_horizontal = bounds%width >= bounds%height
+
+    ! Take largest item (or small group) as pivot
+    ! Determine how many items to take based on size distribution
+    pivot_count = 1
+    pivot_size = nodes(1)%size
+
+    ! Check if we should take more items (if first few are similar size)
+    do i = 2, min(3, num_nodes)
+      size_ratio = real(nodes(i)%size, real64) / real(nodes(1)%size, real64)
+      if (size_ratio > 0.6_real64) then
+        ! Similar size, include in pivot group
+        pivot_count = i
+        pivot_size = pivot_size + nodes(i)%size
+      else
+        exit
+      end if
+    end do
+
+    ! Limit pivot group size
+    pivot_count = min(pivot_count, max(1, num_nodes / 3))
+
+    ! Calculate remaining size
+    remaining_size = total_size - pivot_size
+
+    if (pivot_count >= num_nodes) then
+      ! All items in pivot, just lay them out
+      call simple_stack(nodes, num_nodes, bounds, total_size, split_horizontal)
+      return
+    end if
+
+    ! Calculate pivot area size (proportional to total size)
+    if (split_horizontal) then
+      ! Split left-right: pivot gets left portion
+      pivot_area%x = bounds%x
+      pivot_area%y = bounds%y
+      pivot_area%width = int((real(pivot_size, real64) / real(total_size, real64)) * real(bounds%width, real64))
+      pivot_area%width = max(30, min(pivot_area%width, bounds%width - 30))  ! Ensure minimum remaining
+      pivot_area%height = bounds%height
+
+      ! Remaining area is on the right
+      remaining_area%x = bounds%x + pivot_area%width
+      remaining_area%y = bounds%y
+      remaining_area%width = bounds%width - pivot_area%width
+      remaining_area%height = bounds%height
+    else
+      ! Split top-bottom: pivot gets top portion
+      pivot_area%x = bounds%x
+      pivot_area%y = bounds%y
+      pivot_area%width = bounds%width
+      pivot_area%height = int((real(pivot_size, real64) / real(total_size, real64)) * real(bounds%height, real64))
+      pivot_area%height = max(30, min(pivot_area%height, bounds%height - 30))  ! Ensure minimum remaining
+
+      ! Remaining area is on the bottom
+      remaining_area%x = bounds%x
+      remaining_area%y = bounds%y + pivot_area%height
+      remaining_area%width = bounds%width
+      remaining_area%height = bounds%height - pivot_area%height
+    end if
+
+    ! Layout pivot items in their area
+    call simple_stack(nodes(1:pivot_count), pivot_count, pivot_area, pivot_size, .not. split_horizontal)
+
+    ! Recursively layout remaining items (alternates split direction naturally)
+    if (num_nodes > pivot_count) then
+      call slice_and_dice(nodes(pivot_count+1:num_nodes), num_nodes - pivot_count, &
+                         remaining_area, remaining_size, depth + 1)
+    end if
+  end subroutine slice_and_dice
+
+  ! Simple stacking helper - stacks items in one direction
+  subroutine simple_stack(nodes, num_nodes, bounds, total_size, horizontal)
+    type(file_node), dimension(:), intent(inout) :: nodes
+    integer, intent(in) :: num_nodes
+    type(rect), intent(in) :: bounds
+    integer(int64), intent(in) :: total_size
+    logical, intent(in) :: horizontal
+    integer :: i, offset, item_size
+
+    if (horizontal) then
+      ! Stack left-to-right
+      offset = bounds%x
+      do i = 1, num_nodes
+        if (i < num_nodes) then
+          item_size = int((real(nodes(i)%size, real64) / real(total_size, real64)) * real(bounds%width, real64))
+          item_size = max(10, item_size)
+        else
+          item_size = bounds%x + bounds%width - offset
+        end if
+
+        nodes(i)%bounds%x = offset
+        nodes(i)%bounds%y = bounds%y
+        nodes(i)%bounds%width = item_size
+        nodes(i)%bounds%height = bounds%height
+
+        offset = offset + item_size
+      end do
+    else
+      ! Stack top-to-bottom
+      offset = bounds%y
+      do i = 1, num_nodes
+        if (i < num_nodes) then
+          item_size = int((real(nodes(i)%size, real64) / real(total_size, real64)) * real(bounds%height, real64))
+          item_size = max(3, item_size)
+        else
+          item_size = bounds%y + bounds%height - offset
+        end if
+
+        nodes(i)%bounds%x = bounds%x
+        nodes(i)%bounds%y = offset
+        nodes(i)%bounds%width = bounds%width
+        nodes(i)%bounds%height = item_size
+
+        offset = offset + item_size
+      end do
+    end if
+  end subroutine simple_stack
+
+  ! OLD squarified code - keeping for reference but not used
+  recursive subroutine squarify_OLD(nodes, num_nodes, bounds, total_size)
     type(file_node), dimension(:), intent(inout) :: nodes
     integer, intent(in) :: num_nodes
     type(rect), intent(in) :: bounds
@@ -151,7 +269,7 @@ contains
 
       row_start = row_end + 1
     end do
-  end subroutine squarify
+  end subroutine squarify_OLD
 
   ! Find best row: add items while worst aspect ratio improves
   function find_best_row(nodes, num_nodes, bounds, horizontal, scale_factor) result(row_size)
@@ -453,11 +571,6 @@ contains
       temp_nodes(i)%access_denied = nodes(indices(i))%access_denied
       temp_nodes(i)%bounds = nodes(indices(i))%bounds
       temp_nodes(i)%num_children = nodes(indices(i))%num_children
-      ! Copy GUI-specific fields
-      temp_nodes(i)%color = nodes(indices(i))%color
-      temp_nodes(i)%cushion = nodes(indices(i))%cushion
-      temp_nodes(i)%is_selected = nodes(indices(i))%is_selected
-      temp_nodes(i)%is_hovered = nodes(indices(i))%is_hovered
     end do
 
     ! Move back to original array
@@ -470,11 +583,6 @@ contains
       nodes(i)%access_denied = temp_nodes(i)%access_denied
       nodes(i)%bounds = temp_nodes(i)%bounds
       nodes(i)%num_children = temp_nodes(i)%num_children
-      ! Copy GUI-specific fields
-      nodes(i)%color = temp_nodes(i)%color
-      nodes(i)%cushion = temp_nodes(i)%cushion
-      nodes(i)%is_selected = temp_nodes(i)%is_selected
-      nodes(i)%is_hovered = temp_nodes(i)%is_hovered
     end do
 
     deallocate(indices)

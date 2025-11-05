@@ -189,6 +189,7 @@ contains
     use treemap_renderer, only: scan_and_render_with_interaction
     type(c_ptr), value :: area, cr, user_data
     integer(c_int), value :: width, height
+    logical, save :: first_render = .true.
 
     ! Render the actual treemap with hover and selection
     ! mouse_x and mouse_y are updated by both mouse motion and arrow keys
@@ -199,6 +200,17 @@ contains
       ! Fallback to default if no path set
       call scan_and_render_with_interaction(cr, width, height, mouse_x, mouse_y, &
                                              selected_index)
+    end if
+
+    ! Update breadcrumbs after first render (when scan is complete)
+    if (first_render) then
+      first_render = .false.
+      print *, "First render complete - updating breadcrumbs"
+      if (associated(nav_callback)) then
+        call nav_callback()
+      else
+        print *, "WARNING: nav_callback not associated!"
+      end if
     end if
 
     print *, "Rendered treemap: ", width, "x", height
