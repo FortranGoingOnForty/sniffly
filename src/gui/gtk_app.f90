@@ -13,7 +13,8 @@ module gtk_app
                  gtk_label_new, gtk_label_set_text, gtk_widget_set_halign, &
                  GTK_ALIGN_START, gtk_progress_bar_new, gtk_progress_bar_set_fraction, &
                  gtk_progress_bar_set_text, gtk_progress_bar_set_show_text, &
-                 gtk_widget_set_visible
+                 gtk_widget_set_visible, &
+                 gtk_button_new, gtk_button_set_icon_name
   use g, only: g_application_run, g_idle_add
   use treemap_widget, only: create_treemap_widget, set_scan_path, register_navigation_callback, &
                              register_key_handler, register_quit_callback, mark_initial_scan_complete
@@ -91,7 +92,7 @@ contains
   ! Callback when application activates (startup)
   subroutine on_activate(app, user_data) bind(c)
     type(c_ptr), value :: app, user_data
-    type(c_ptr) :: drawing_area, main_box, toolbar, scan_btn, quit_btn, status_bar, breadcrumb_bar
+    type(c_ptr) :: drawing_area, main_box, toolbar, open_dir_btn, scan_btn, status_bar, breadcrumb_bar
     character(len=512) :: scan_path
     integer(c_int) :: idle_id
 
@@ -124,17 +125,18 @@ contains
     ! Create toolbar (horizontal box)
     toolbar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5_c_int)
 
+    ! Create Open Directory button with folder icon
+    open_dir_btn = gtk_button_new()
+    call gtk_button_set_icon_name(open_dir_btn, "folder-open"//c_null_char)
+    call g_signal_connect(open_dir_btn, "clicked"//c_null_char, &
+                           c_funloc(on_open_dir_clicked), c_null_ptr)
+    call gtk_box_append(toolbar, open_dir_btn)
+
     ! Create Scan button
     scan_btn = gtk_button_new_with_label("Scan"//c_null_char)
     call g_signal_connect(scan_btn, "clicked"//c_null_char, &
                            c_funloc(on_scan_clicked), c_null_ptr)
     call gtk_box_append(toolbar, scan_btn)
-
-    ! Create Quit button
-    quit_btn = gtk_button_new_with_label("Quit"//c_null_char)
-    call g_signal_connect(quit_btn, "clicked"//c_null_char, &
-                           c_funloc(on_quit_clicked), c_null_ptr)
-    call gtk_box_append(toolbar, quit_btn)
 
     ! Create progress bar (always visible but starts at 0%)
     ! Place it in toolbar, expanded to fill remaining space (pushes to right)
@@ -212,18 +214,96 @@ contains
     print *, "Window size: ", DEFAULT_WIDTH, "x", DEFAULT_HEIGHT
   end subroutine on_activate
 
+  ! Callback when Open Directory button is clicked
+  ! NOTE: Uses system command for file picking until GTK4 file dialog bindings are available
+  subroutine on_open_dir_clicked(button, user_data) bind(c)
+    type(c_ptr), value :: button, user_data
+    character(len=1024) :: selected_path
+    integer :: status
+
+    print *, "Open Directory button clicked!"
+
+    ! Call helper to show native file picker
+    call show_native_directory_picker(selected_path, status)
+
+    if (status == 0 .and. len_trim(selected_path) > 0) then
+      print *, "Selected directory: ", trim(selected_path)
+
+      ! Update global scan path
+      global_scan_path = selected_path
+      call set_scan_path(selected_path)
+
+      ! TODO: Trigger rescan here
+      print *, "TODO: Trigger rescan of: ", trim(selected_path)
+    else
+      print *, "Directory selection cancelled or failed"
+    end if
+  end subroutine on_open_dir_clicked
+
   ! Callback when Scan button is clicked
   subroutine on_scan_clicked(button, user_data) bind(c)
     type(c_ptr), value :: button, user_data
     print *, "Scan button clicked! (Directory chooser coming soon...)"
   end subroutine on_scan_clicked
 
-  ! Callback when Quit button is clicked
-  subroutine on_quit_clicked(button, user_data) bind(c)
-    type(c_ptr), value :: button, user_data
-    print *, "Quit button clicked"
-    call sniffly_app_quit()
-  end subroutine on_quit_clicked
+  ! Show native OS directory picker using system commands
+  ! This is a workaround until GTK4 file dialog bindings are available
+  subroutine show_native_directory_picker(path, status)
+    character(len=*), intent(out) :: path
+    integer, intent(out) :: status
+    character(len=2048) :: command, temp_file
+    integer :: unit, ios
+    logical :: file_exists
+
+    path = ""
+    status = -1
+
+    ! Create temp file for output
+    temp_file = "/tmp/sniffly_picker.txt"
+
+    ! Platform-specific command
+#ifdef __APPLE__
+    ! macOS: Use osascript to show native folder picker
+    command = 'osascript -e ''POSIX path of (choose folder with prompt "Select directory to scan:")'' > ' &
+              // trim(temp_file) // ' 2>&1'
+#else
+    ! Linux: Try zenity, fallback to kdialog
+    command = 'zenity --file-selection --directory > ' // trim(temp_file) // &
+              ' 2>&1 || kdialog --getexistingdirectory . > ' // trim(temp_file) // ' 2>&1'
+#endif
+
+    print *, "Executing: ", trim(command)
+
+    ! Execute command
+    call execute_command_line(trim(command), exitstat=status)
+
+    ! Read result from temp file
+    inquire(file=trim(temp_file), exist=file_exists)
+    if (file_exists) then
+      open(newunit=unit, file=trim(temp_file), status='old', action='read', iostat=ios)
+      if (ios == 0) then
+        read(unit, '(A)', iostat=ios) path
+        close(unit)
+
+        ! Remove temp file
+        call execute_command_line('rm -f ' // trim(temp_file))
+
+        ! Trim whitespace and check if valid
+        path = trim(adjustl(path))
+        if (len_trim(path) > 0) then
+          status = 0
+          print *, "Got path: ", trim(path)
+        else
+          status = 1
+        end if
+      else
+        close(unit)
+        status = 1
+      end if
+    else
+      status = 1
+    end if
+  end subroutine show_native_directory_picker
 
   ! Update status bar with scan information
   subroutine sniffly_update_status(message)
