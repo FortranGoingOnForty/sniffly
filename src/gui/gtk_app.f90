@@ -19,8 +19,8 @@ module gtk_app
                  gtk_editable_set_editable
   use g, only: g_application_run, g_idle_add
   use treemap_widget, only: create_treemap_widget, set_scan_path, register_navigation_callback, &
-                             register_key_handler, register_quit_callback, mark_initial_scan_complete, &
-                             has_selection, get_selected_node_path
+                             register_key_handler, register_quit_callback, register_delete_callback, &
+                             mark_initial_scan_complete, has_selection, get_selected_node_path
   use treemap_renderer, only: register_progress_callback, scan_directory
   implicit none
   private
@@ -206,6 +206,9 @@ contains
 
     ! Register quit callback
     call register_quit_callback(quit_callback_wrapper)
+
+    ! Register delete callback
+    call register_delete_callback(delete_callback_wrapper)
 
     ! Register progress callbacks
     call register_progress_callback(sniffly_show_progress, sniffly_hide_progress, &
@@ -511,7 +514,14 @@ contains
 
     if (status == 0) then
       print *, "Successfully moved to trash: ", trim(path)
-      ! TODO: Trigger rescan to update the visualization
+
+      ! Trigger rescan to update the visualization
+      if (len_trim(global_scan_path) > 0) then
+        print *, "Rescanning after delete: ", trim(global_scan_path)
+        call trigger_rescan(global_scan_path)
+      else
+        print *, "WARNING: No scan path set, cannot rescan after delete"
+      end if
     else
       print *, "ERROR: Failed to move to trash (exit status: ", status, ")"
       print *, "You may need to delete manually or check permissions"
@@ -651,6 +661,40 @@ contains
   subroutine quit_callback_wrapper()
     call sniffly_app_quit()
   end subroutine quit_callback_wrapper
+
+  ! Callback wrapper for delete events (no arguments)
+  subroutine delete_callback_wrapper()
+    character(len=:), allocatable :: selected_path
+    integer :: confirm_result
+
+    print *, "Delete callback triggered from keyboard"
+
+    ! Check if there's a selection
+    if (.not. has_selection()) then
+      print *, "No selection - cannot delete"
+      return
+    end if
+
+    ! Get the selected node path
+    selected_path = get_selected_node_path()
+
+    if (len_trim(selected_path) == 0) then
+      print *, "Invalid selection path"
+      return
+    end if
+
+    print *, "Preparing to delete: ", trim(selected_path)
+
+    ! Show confirmation dialog
+    call show_delete_confirmation(selected_path, confirm_result)
+
+    if (confirm_result == 1) then
+      print *, "Delete confirmed - proceeding"
+      call delete_to_trash(selected_path)
+    else
+      print *, "Delete cancelled by user"
+    end if
+  end subroutine delete_callback_wrapper
 
   ! Trigger a rescan of the given directory (for UI buttons)
   subroutine trigger_rescan(path)

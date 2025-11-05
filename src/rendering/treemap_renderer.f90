@@ -110,17 +110,21 @@ contains
   subroutine scan_directory(path)
     use, intrinsic :: iso_c_binding
     use disk_scanner, only: set_progress_callback
+    use file_system, only: get_absolute_path
     character(len=*), intent(in) :: path
+    character(len=:), allocatable :: expanded_path
     integer :: cache_index, i
     character(len=512) :: status_msg
     type(c_ptr) :: context
     integer(c_int) :: events_processed
 
-    print *, "Scanning: ", trim(path)
+    ! Expand relative paths (like ./) to absolute paths for meaningful breadcrumbs
+    expanded_path = get_absolute_path(path)
+    print *, "Scanning: ", trim(expanded_path)
 
     ! Mark as having data IMMEDIATELY to prevent recursive scans
     has_data = .true.
-    scanned_path = trim(path)
+    scanned_path = trim(expanded_path)
 
     ! Register progress callback with disk_scanner
     if (associated(update_progress_cb)) then
@@ -138,7 +142,7 @@ contains
     end do
 
     ! Now update with initial message
-    write(status_msg, '(A,A)') 'Scanning: ', trim(path)
+    write(status_msg, '(A,A)') 'Scanning: ', trim(expanded_path)
     if (associated(update_progress_cb)) call update_progress_cb(0.1_c_double, status_msg)
 
     ! Process events again to show the update
@@ -148,7 +152,7 @@ contains
     end do
 
     ! Check cache first
-    cache_index = cache_lookup(path)
+    cache_index = cache_lookup(expanded_path)
     if (cache_index > 0) then
       ! Use cached scan (already colored)
       if (associated(update_progress_cb)) call update_progress_cb(0.5_c_double, 'Loading from cache...')
@@ -163,7 +167,7 @@ contains
       do while (g_main_context_iteration(context, 0_c_int) /= 0_c_int)
       end do
 
-      call build_tree(path, root_node)
+      call build_tree(expanded_path, root_node)
 
       ! Assign colors to nodes BEFORE caching
       if (associated(update_progress_cb)) call update_progress_cb(0.85_c_double, 'Assigning colors...')
@@ -174,7 +178,7 @@ contains
       call color_tree(root_node, 0)
 
       ! Store in cache (now with colors)
-      call cache_store(path, root_node)
+      call cache_store(expanded_path, root_node)
     end if
 
     ! Start view at root level (showing only top-level items)

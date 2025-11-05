@@ -13,8 +13,8 @@ module treemap_widget
   private
 
   public :: create_treemap_widget, set_scan_path, get_widget_ptr, register_navigation_callback, &
-            register_key_handler, register_quit_callback, mark_initial_scan_complete, &
-            get_selected_node_path, has_selection
+            register_key_handler, register_quit_callback, register_delete_callback, &
+            mark_initial_scan_complete, get_selected_node_path, has_selection
 
   ! Callback interface for navigation events
   abstract interface
@@ -28,6 +28,12 @@ module treemap_widget
     end subroutine quit_callback
   end interface
 
+  ! Callback interface for delete events
+  abstract interface
+    subroutine delete_callback()
+    end subroutine delete_callback
+  end interface
+
   ! GDK Key constants
   integer(c_int), parameter :: GDK_KEY_Return = 65293_c_int      ! Enter key
   integer(c_int), parameter :: GDK_KEY_BackSpace = 65288_c_int   ! Backspace key
@@ -38,6 +44,7 @@ module treemap_widget
   integer(c_int), parameter :: GDK_KEY_space = 32_c_int          ! Spacebar
   integer(c_int), parameter :: GDK_KEY_period = 46_c_int         ! Period key
   integer(c_int), parameter :: GDK_KEY_q = 113_c_int             ! q key
+  integer(c_int), parameter :: GDK_KEY_d = 100_c_int             ! d key
 
   ! Widget state (will expand later)
   type(c_ptr), save :: widget_ptr = c_null_ptr
@@ -62,6 +69,9 @@ module treemap_widget
 
   ! Quit callback (called when user wants to quit)
   procedure(quit_callback), pointer, save :: quit_cb => null()
+
+  ! Delete callback (called when user wants to delete)
+  procedure(delete_callback), pointer, save :: delete_cb => null()
 
 contains
 
@@ -149,6 +159,13 @@ contains
     quit_cb => callback
     print *, "Quit callback registered"
   end subroutine register_quit_callback
+
+  ! Register a callback to be called when user wants to delete
+  subroutine register_delete_callback(callback)
+    procedure(delete_callback) :: callback
+    delete_cb => callback
+    print *, "Delete callback registered"
+  end subroutine register_delete_callback
 
   ! Mark that the initial scan has completed
   subroutine mark_initial_scan_complete()
@@ -398,6 +415,14 @@ contains
       print *, "Q pressed - quitting application"
       if (associated(quit_cb)) then
         call quit_cb()
+      end if
+      handled = 1_c_int
+
+    ! D key: Delete selected item
+    else if (keyval == GDK_KEY_d) then
+      print *, "D pressed - triggering delete"
+      if (associated(delete_cb)) then
+        call delete_cb()
       end if
       handled = 1_c_int
     end if
