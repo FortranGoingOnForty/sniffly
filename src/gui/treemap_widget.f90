@@ -8,10 +8,11 @@ module treemap_widget
   implicit none
   private
 
-  public :: create_treemap_widget
+  public :: create_treemap_widget, set_scan_path
 
   ! Widget state (will expand later)
   type(c_ptr), save :: widget_ptr = c_null_ptr
+  character(len=512), save :: scan_path = ""
 
 contains
 
@@ -43,13 +44,25 @@ contains
     print *, "Treemap widget created successfully"
   end function create_treemap_widget
 
+  ! Set the directory path to scan
+  subroutine set_scan_path(path)
+    character(len=*), intent(in) :: path
+    scan_path = trim(path)
+    print *, "Scan path set to: ", trim(scan_path)
+  end subroutine set_scan_path
+
   ! Draw callback - this is where we render the treemap!
   subroutine on_draw(area, cr, width, height, user_data) bind(c)
     type(c_ptr), value :: area, cr, user_data
     integer(c_int), value :: width, height
 
-    ! Render the actual treemap!
-    call scan_and_render(cr, width, height)
+    ! Render the actual treemap with the selected path
+    if (len_trim(scan_path) > 0) then
+      call scan_and_render(cr, width, height, trim(scan_path))
+    else
+      ! Fallback to default if no path set
+      call scan_and_render(cr, width, height)
+    end if
 
     print *, "Rendered treemap: ", width, "x", height
   end subroutine on_draw

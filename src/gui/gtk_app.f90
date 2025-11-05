@@ -8,11 +8,11 @@ module gtk_app
                  gtk_application_get_active_window, gtk_window_destroy, &
                  gtk_window_set_child, g_signal_connect
   use g, only: g_application_run
-  use treemap_widget, only: create_treemap_widget
+  use treemap_widget, only: create_treemap_widget, set_scan_path
   implicit none
   private
 
-  public :: sniffly_app_run, sniffly_app_quit
+  public :: sniffly_app_run, sniffly_app_quit, sniffly_set_scan_path
 
   ! Application constants
   character(len=*), parameter :: APP_ID = "org.fortrangoingonforty.sniffly"
@@ -23,6 +23,9 @@ module gtk_app
   ! Global application pointer (will be set in activate callback)
   type(c_ptr), save :: app_ptr = c_null_ptr
   type(c_ptr), save :: main_window_ptr = c_null_ptr
+
+  ! Global scan path (can be set via command line)
+  character(len=512), save :: global_scan_path = ""
 
 contains
 
@@ -61,10 +64,18 @@ contains
     end if
   end subroutine sniffly_app_quit
 
+  ! Set the directory path to scan (call before sniffly_app_run)
+  subroutine sniffly_set_scan_path(path)
+    character(len=*), intent(in) :: path
+    global_scan_path = trim(path)
+    print *, "Scan path set to: ", trim(global_scan_path)
+  end subroutine sniffly_set_scan_path
+
   ! Callback when application activates (startup)
   subroutine on_activate(app, user_data) bind(c)
     type(c_ptr), value :: app, user_data
     type(c_ptr) :: drawing_area
+    character(len=512) :: scan_path
 
     ! Create main window
     main_window_ptr = gtk_application_window_new(app)
@@ -80,6 +91,15 @@ contains
                                       int(DEFAULT_WIDTH, c_int), &
                                       int(DEFAULT_HEIGHT, c_int))
 
+    ! Use global scan path or default
+    if (len_trim(global_scan_path) > 0) then
+      scan_path = global_scan_path
+      print *, "Using specified directory: ", trim(scan_path)
+    else
+      scan_path = "/Users/matthewwolffe/Downloads"
+      print *, "Using default directory: ", trim(scan_path)
+    end if
+
     ! Create treemap drawing area widget
     drawing_area = create_treemap_widget()
 
@@ -87,6 +107,9 @@ contains
       print *, "ERROR: Failed to create treemap widget"
       return
     end if
+
+    ! Set the scan path
+    call set_scan_path(scan_path)
 
     ! Add drawing area to window
     call gtk_window_set_child(main_window_ptr, drawing_area)
