@@ -14,7 +14,8 @@ module treemap_renderer
   private
 
   public :: scan_and_render, init_renderer, get_root_node, scan_and_render_with_hover, &
-            scan_and_render_with_interaction, find_node_at_position, navigate_into_node
+            scan_and_render_with_interaction, find_node_at_position, navigate_into_node, &
+            navigate_up, get_breadcrumb_path, get_path_depth
 
   ! Global state
   type(file_node), save, target :: root_node
@@ -25,6 +26,12 @@ module treemap_renderer
   ! Layout cache state
   logical, save :: layout_calculated = .false.
   integer, save :: last_width = 0, last_height = 0
+
+  ! Navigation path stack (for breadcrumbs)
+  ! Simple approach: track path as array of names
+  integer, parameter :: MAX_PATH_DEPTH = 100
+  character(len=256), save :: path_names(MAX_PATH_DEPTH)
+  integer, save :: path_depth = 0
 
 contains
 
@@ -57,6 +64,10 @@ contains
 
     ! Start view at root level (showing only top-level items)
     current_view_node => root_node
+
+    ! Initialize breadcrumb path stack with root path
+    path_depth = 1
+    path_names(1) = trim(scanned_path)
 
     print *, "Scan complete. Root size: ", root_node%size, " bytes"
     print *, "Children: ", root_node%num_children
@@ -270,16 +281,87 @@ contains
     ! Navigate into the directory
     current_view_node => current_view_node%children(index)
 
+    ! Push onto path stack for breadcrumbs
+    if (path_depth < MAX_PATH_DEPTH) then
+      path_depth = path_depth + 1
+      if (allocated(current_view_node%name)) then
+        path_names(path_depth) = current_view_node%name
+      else
+        path_names(path_depth) = "(unnamed)"
+      end if
+    else
+      print *, "WARNING: Max path depth reached!"
+    end if
+
     ! Reset layout cache to force recalculation
     layout_calculated = .false.
 
     if (allocated(current_view_node%name)) then
       print *, "Navigated into: ", trim(current_view_node%name)
       print *, "Children: ", current_view_node%num_children
+      print *, "Path depth: ", path_depth
     else
       print *, "Navigated into directory (no name)"
     end if
   end subroutine navigate_into_node
+
+  ! Navigate up one level (back button / breadcrumb click)
+  subroutine navigate_up(levels)
+    integer, intent(in), optional :: levels
+    integer :: levels_to_go
+    integer :: i
+    type(file_node), pointer :: temp_node
+
+    if (present(levels)) then
+      levels_to_go = levels
+    else
+      levels_to_go = 1
+    end if
+
+    ! Can't go above root
+    if (path_depth <= 1) then
+      print *, "Already at root"
+      return
+    end if
+
+    ! Go up the specified number of levels
+    path_depth = max(1, path_depth - levels_to_go)
+
+    ! Navigate back up to the correct node
+    temp_node => root_node
+    do i = 2, path_depth
+      ! Find child matching path_names(i)
+      ! For now, just go to root if depth = 1
+      if (path_depth == 1) then
+        temp_node => root_node
+        exit
+      end if
+    end do
+    current_view_node => temp_node
+
+    ! Reset layout cache
+    layout_calculated = .false.
+
+    print *, "Navigated up to depth: ", path_depth
+  end subroutine navigate_up
+
+  ! Get current path depth
+  function get_path_depth() result(depth)
+    integer :: depth
+    depth = path_depth
+  end function get_path_depth
+
+  ! Get breadcrumb path (returns array of names)
+  subroutine get_breadcrumb_path(names, count)
+    character(len=256), dimension(:), intent(out) :: names
+    integer, intent(out) :: count
+    integer :: i
+
+    count = path_depth
+    do i = 1, min(path_depth, size(names))
+      names(i) = path_names(i)
+    end do
+  end subroutine get_breadcrumb_path
 
   ! Render hover highlight overlay
   subroutine render_hover_highlight(cr, node)
@@ -430,15 +512,38 @@ contains
     call render_label(cr, node, x, y, w, h)
   end subroutine render_node
 
+  ! Format file size in human-readable format
+  function format_size(size_bytes) result(size_str)
+    use iso_fortran_env, only: int64, real64
+    integer(int64), intent(in) :: size_bytes
+    character(len=20) :: size_str
+    real(real64) :: size_val
+
+    if (size_bytes < 1024_int64) then
+      write(size_str, '(I0, A)') size_bytes, ' B'
+    else if (size_bytes < 1024_int64 * 1024_int64) then
+      size_val = real(size_bytes, real64) / 1024.0d0
+      write(size_str, '(F0.1, A)') size_val, ' KB'
+    else if (size_bytes < 1024_int64 * 1024_int64 * 1024_int64) then
+      size_val = real(size_bytes, real64) / (1024.0d0 * 1024.0d0)
+      write(size_str, '(F0.1, A)') size_val, ' MB'
+    else
+      size_val = real(size_bytes, real64) / (1024.0d0 * 1024.0d0 * 1024.0d0)
+      write(size_str, '(F0.1, A)') size_val, ' GB'
+    end if
+  end function format_size
+
   ! Render text label for a node
   subroutine render_label(cr, node, x, y, w, h)
+    use iso_fortran_env, only: int64
     type(c_ptr), intent(in) :: cr
     type(file_node), intent(in) :: node
     real(c_double), intent(in) :: x, y, w, h
-    real(c_double) :: font_size, text_x, text_y
+    real(c_double) :: font_size, text_x, text_y, size_font
     integer :: min_width, min_height
     character(len=:), allocatable :: display_name
     character(len=256) :: name_copy
+    character(len=20) :: size_text
 
     ! Minimum rectangle size for text (pixels)
     min_width = 50
@@ -466,10 +571,24 @@ contains
     text_x = x + 4.0d0
     text_y = y + font_size + 2.0d0
 
-    ! Draw text with white color for visibility
+    ! Draw name with white color for visibility
     call cairo_set_source_rgb(cr, 1.0d0, 1.0d0, 1.0d0)
     call cairo_move_to(cr, text_x, text_y)
     call cairo_show_text(cr, trim(name_copy)//c_null_char)
+
+    ! Draw size label on second line if rectangle is tall enough
+    if (h > 40) then
+      size_text = format_size(node%size)
+      size_font = max(font_size * 0.8d0, 8.0d0)  ! Slightly smaller font for size
+
+      call cairo_set_font_size(cr, size_font)
+      text_y = text_y + size_font + 2.0d0  ! Move down for second line
+
+      ! Draw size in light gray/white
+      call cairo_set_source_rgb(cr, 0.9d0, 0.9d0, 0.9d0)
+      call cairo_move_to(cr, text_x, text_y)
+      call cairo_show_text(cr, trim(size_text)//c_null_char)
+    end if
   end subroutine render_label
 
 end module treemap_renderer

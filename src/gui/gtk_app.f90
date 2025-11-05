@@ -18,7 +18,7 @@ module gtk_app
   private
 
   public :: sniffly_app_run, sniffly_app_quit, sniffly_set_scan_path, &
-            sniffly_update_status
+            sniffly_update_status, sniffly_update_breadcrumbs
 
   ! Application constants
   character(len=*), parameter :: APP_ID = "org.fortrangoingonforty.sniffly"
@@ -30,6 +30,7 @@ module gtk_app
   type(c_ptr), save :: app_ptr = c_null_ptr
   type(c_ptr), save :: main_window_ptr = c_null_ptr
   type(c_ptr), save :: status_label_ptr = c_null_ptr
+  type(c_ptr), save :: breadcrumb_label_ptr = c_null_ptr
 
   ! Global scan path (can be set via command line)
   character(len=512), save :: global_scan_path = ""
@@ -81,7 +82,7 @@ contains
   ! Callback when application activates (startup)
   subroutine on_activate(app, user_data) bind(c)
     type(c_ptr), value :: app, user_data
-    type(c_ptr) :: drawing_area, main_box, toolbar, scan_btn, quit_btn, status_bar
+    type(c_ptr) :: drawing_area, main_box, toolbar, scan_btn, quit_btn, status_bar, breadcrumb_bar
     character(len=512) :: scan_path
 
     ! Create main window
@@ -127,6 +128,15 @@ contains
 
     ! Add toolbar to main box
     call gtk_box_append(main_box, toolbar)
+
+    ! Create breadcrumb bar (horizontal box with path label)
+    breadcrumb_bar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5_c_int)
+    breadcrumb_label_ptr = gtk_label_new("/"//c_null_char)
+    call gtk_widget_set_halign(breadcrumb_label_ptr, GTK_ALIGN_START)
+    call gtk_box_append(breadcrumb_bar, breadcrumb_label_ptr)
+
+    ! Add breadcrumb bar to main box
+    call gtk_box_append(main_box, breadcrumb_bar)
 
     ! Create treemap drawing area widget
     drawing_area = create_treemap_widget()
@@ -185,5 +195,30 @@ contains
       call gtk_label_set_text(status_label_ptr, trim(message)//c_null_char)
     end if
   end subroutine sniffly_update_status
+
+  ! Update breadcrumb bar with current path
+  subroutine sniffly_update_breadcrumbs()
+    use treemap_renderer, only: get_breadcrumb_path, get_path_depth
+    character(len=256), dimension(100) :: names
+    character(len=2048) :: path_str
+    integer :: count, i
+
+    if (.not. c_associated(breadcrumb_label_ptr)) return
+
+    ! Get breadcrumb path from renderer
+    call get_breadcrumb_path(names, count)
+
+    ! Build path string with " > " separators
+    path_str = ""
+    do i = 1, count
+      if (i > 1) then
+        path_str = trim(path_str) // " > "
+      end if
+      path_str = trim(path_str) // trim(names(i))
+    end do
+
+    ! Update label
+    call gtk_label_set_text(breadcrumb_label_ptr, trim(path_str)//c_null_char)
+  end subroutine sniffly_update_breadcrumbs
 
 end module gtk_app
