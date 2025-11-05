@@ -12,12 +12,18 @@ module treemap_widget
   private
 
   public :: create_treemap_widget, set_scan_path, get_widget_ptr, register_navigation_callback, &
-            register_key_handler
+            register_key_handler, register_quit_callback, mark_initial_scan_complete
 
   ! Callback interface for navigation events
   abstract interface
     subroutine navigation_callback()
     end subroutine navigation_callback
+  end interface
+
+  ! Callback interface for quit events
+  abstract interface
+    subroutine quit_callback()
+    end subroutine quit_callback
   end interface
 
   ! GDK Key constants
@@ -29,6 +35,7 @@ module treemap_widget
   integer(c_int), parameter :: GDK_KEY_Down = 65364_c_int        ! Down arrow
   integer(c_int), parameter :: GDK_KEY_space = 32_c_int          ! Spacebar
   integer(c_int), parameter :: GDK_KEY_period = 46_c_int         ! Period key
+  integer(c_int), parameter :: GDK_KEY_q = 113_c_int             ! q key
 
   ! Widget state (will expand later)
   type(c_ptr), save :: widget_ptr = c_null_ptr
@@ -45,8 +52,14 @@ module treemap_widget
   ! Selection state
   integer, save :: selected_index = 0  ! 0 = no selection
 
+  ! Initial scan state
+  logical, save :: initial_scan_complete = .false.
+
   ! Navigation callback (called when user navigates)
   procedure(navigation_callback), pointer, save :: nav_callback => null()
+
+  ! Quit callback (called when user wants to quit)
+  procedure(quit_callback), pointer, save :: quit_cb => null()
 
 contains
 
@@ -128,6 +141,19 @@ contains
     print *, "Navigation callback registered"
   end subroutine register_navigation_callback
 
+  ! Register a callback to be called when user wants to quit
+  subroutine register_quit_callback(callback)
+    procedure(quit_callback) :: callback
+    quit_cb => callback
+    print *, "Quit callback registered"
+  end subroutine register_quit_callback
+
+  ! Mark that the initial scan has completed
+  subroutine mark_initial_scan_complete()
+    initial_scan_complete = .true.
+    print *, "Initial scan marked as complete"
+  end subroutine mark_initial_scan_complete
+
   ! Motion callback - track mouse position for hover
   subroutine on_motion(controller, x, y, user_data) bind(c)
     use gtk, only: gtk_widget_grab_focus
@@ -195,6 +221,12 @@ contains
     type(c_ptr), value :: area, cr, user_data
     integer(c_int), value :: width, height
     logical, save :: first_render = .true.
+
+    ! Skip rendering if initial scan hasn't completed yet
+    if (.not. initial_scan_complete) then
+      print *, "Skipping render - waiting for initial scan to complete"
+      return
+    end if
 
     ! Render the actual treemap with hover and selection
     ! mouse_x and mouse_y are updated by both mouse motion and arrow keys
@@ -356,6 +388,14 @@ contains
         call gtk_widget_queue_draw(widget_ptr)
       end if
 
+      handled = 1_c_int
+
+    ! Q key: Quit application
+    else if (keyval == GDK_KEY_q) then
+      print *, "Q pressed - quitting application"
+      if (associated(quit_cb)) then
+        call quit_cb()
+      end if
       handled = 1_c_int
     end if
 

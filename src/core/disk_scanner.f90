@@ -1,7 +1,9 @@
 module disk_scanner
+  use, intrinsic :: iso_c_binding
   use types
   use file_system
   use iso_fortran_env, only: int64
+  use g, only: g_main_context_default, g_main_context_iteration
   implicit none
   private
 
@@ -14,6 +16,10 @@ module disk_scanner
   ! Small file grouping thresholds
   real, parameter :: SMALL_FILE_THRESHOLD = 0.005  ! 0.5% of parent size
   integer, parameter :: MIN_SMALL_FILES = 10        ! Minimum count to trigger grouping
+
+  ! UI responsiveness - process GTK events every N directories
+  integer, parameter :: DIRS_PER_UI_UPDATE = 10
+  integer, save :: dir_scan_counter = 0
 
 contains
 
@@ -149,13 +155,27 @@ contains
     character(len=512) :: child_path
     integer, parameter :: MAX_DEPTH = 100
     integer, parameter :: MAX_FILES_PER_DIR = 10000
+    type(c_ptr) :: context
 
     ! Handle depth parameter
     if (present(current_depth)) then
       depth = current_depth
     else
       depth = 0
+      ! Reset counter at start of new top-level scan
+      dir_scan_counter = 0
     end if
+
+    ! Process GTK events periodically to keep UI responsive
+    ! Only at top levels to avoid excessive overhead
+    if (depth == 0 .or. (depth <= 3 .and. mod(dir_scan_counter, DIRS_PER_UI_UPDATE) == 0)) then
+      context = g_main_context_default()
+      do while (g_main_context_iteration(context, 0_c_int) /= 0_c_int)
+      end do
+    end if
+
+    ! Increment directory counter
+    dir_scan_counter = dir_scan_counter + 1
 
     ! Set node properties
     node%path = path

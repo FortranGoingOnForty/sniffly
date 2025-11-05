@@ -11,15 +11,19 @@ module gtk_app
                  GTK_ORIENTATION_HORIZONTAL, gtk_button_new_with_label, &
                  gtk_widget_set_hexpand, gtk_widget_set_vexpand, &
                  gtk_label_new, gtk_label_set_text, gtk_widget_set_halign, &
-                 GTK_ALIGN_START
-  use g, only: g_application_run
+                 GTK_ALIGN_START, gtk_progress_bar_new, gtk_progress_bar_set_fraction, &
+                 gtk_progress_bar_set_text, gtk_progress_bar_set_show_text, &
+                 gtk_widget_set_visible
+  use g, only: g_application_run, g_idle_add
   use treemap_widget, only: create_treemap_widget, set_scan_path, register_navigation_callback, &
-                             register_key_handler
+                             register_key_handler, register_quit_callback, mark_initial_scan_complete
+  use treemap_renderer, only: register_progress_callback, scan_directory
   implicit none
   private
 
   public :: sniffly_app_run, sniffly_app_quit, sniffly_set_scan_path, &
-            sniffly_update_status, sniffly_update_breadcrumbs, breadcrumb_callback
+            sniffly_update_status, sniffly_update_breadcrumbs, breadcrumb_callback, &
+            sniffly_update_progress, sniffly_show_progress, sniffly_hide_progress
 
   ! Application constants
   character(len=*), parameter :: APP_ID = "org.fortrangoingonforty.sniffly"
@@ -32,9 +36,13 @@ module gtk_app
   type(c_ptr), save :: main_window_ptr = c_null_ptr
   type(c_ptr), save :: status_label_ptr = c_null_ptr
   type(c_ptr), save :: breadcrumb_label_ptr = c_null_ptr
+  type(c_ptr), save :: progress_bar_ptr = c_null_ptr
 
   ! Global scan path (can be set via command line)
   character(len=512), save :: global_scan_path = ""
+
+  ! Scan path for async initial scan
+  character(len=512), save :: pending_scan_path = ""
 
 contains
 
@@ -85,6 +93,7 @@ contains
     type(c_ptr), value :: app, user_data
     type(c_ptr) :: drawing_area, main_box, toolbar, scan_btn, quit_btn, status_bar, breadcrumb_bar
     character(len=512) :: scan_path
+    integer(c_int) :: idle_id
 
     ! Create main window
     main_window_ptr = gtk_application_window_new(app)
@@ -127,6 +136,14 @@ contains
                            c_funloc(on_quit_clicked), c_null_ptr)
     call gtk_box_append(toolbar, quit_btn)
 
+    ! Create progress bar (always visible but starts at 0%)
+    ! Place it in toolbar, expanded to fill remaining space (pushes to right)
+    progress_bar_ptr = gtk_progress_bar_new()
+    call gtk_progress_bar_set_show_text(progress_bar_ptr, 1_c_int)  ! Show percentage text
+    call gtk_widget_set_hexpand(progress_bar_ptr, 1_c_int)  ! Expand horizontally to fill space
+    call gtk_progress_bar_set_fraction(progress_bar_ptr, 0.0_c_double)  ! Start at 0%
+    call gtk_box_append(toolbar, progress_bar_ptr)
+
     ! Add toolbar to main box
     call gtk_box_append(main_box, toolbar)
 
@@ -157,15 +174,19 @@ contains
     ! Register navigation callback for breadcrumb updates
     call register_navigation_callback(breadcrumb_callback)
 
-    ! Initialize breadcrumb display (will update after first render)
-    call sniffly_update_breadcrumbs()
+    ! Register quit callback
+    call register_quit_callback(quit_callback_wrapper)
+
+    ! Register progress callbacks
+    call register_progress_callback(sniffly_show_progress, sniffly_hide_progress, &
+                                      sniffly_update_progress)
 
     ! Add drawing area to main box
     call gtk_box_append(main_box, drawing_area)
 
-    ! Create status bar (horizontal box with label)
+    ! Create status bar (horizontal box with label only)
     status_bar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5_c_int)
-    status_label_ptr = gtk_label_new("Ready to scan..."//c_null_char)
+    status_label_ptr = gtk_label_new("Preparing to scan..."//c_null_char)
     call gtk_widget_set_halign(status_label_ptr, GTK_ALIGN_START)
     call gtk_box_append(status_bar, status_label_ptr)
 
@@ -178,10 +199,16 @@ contains
     ! Register keyboard handler on window (not widget) for global keyboard capture
     call register_key_handler(main_window_ptr)
 
-    ! Show the window
+    ! Show the window first with "Scanning..." status
     call gtk_window_present(main_window_ptr)
 
-    print *, "Sniffly started successfully!"
+    ! Store scan path for idle callback
+    pending_scan_path = scan_path
+
+    ! Schedule initial scan to run when GTK is idle (after window is shown)
+    idle_id = g_idle_add(c_funloc(perform_initial_scan), c_null_ptr)
+
+    print *, "Sniffly started successfully! Scan will begin shortly..."
     print *, "Window size: ", DEFAULT_WIDTH, "x", DEFAULT_HEIGHT
   end subroutine on_activate
 
@@ -277,5 +304,82 @@ contains
   subroutine breadcrumb_callback()
     call sniffly_update_breadcrumbs()
   end subroutine breadcrumb_callback
+
+  ! Show progress bar (now just resets to prepare for updates)
+  subroutine sniffly_show_progress()
+    if (c_associated(progress_bar_ptr)) then
+      call gtk_progress_bar_set_fraction(progress_bar_ptr, 0.0_c_double)
+      call gtk_progress_bar_set_text(progress_bar_ptr, "0%"//c_null_char)
+    end if
+  end subroutine sniffly_show_progress
+
+  ! Hide progress bar (now just resets to 0%)
+  subroutine sniffly_hide_progress()
+    if (c_associated(progress_bar_ptr)) then
+      call gtk_progress_bar_set_fraction(progress_bar_ptr, 0.0_c_double)
+      call gtk_progress_bar_set_text(progress_bar_ptr, ""//c_null_char)
+    end if
+  end subroutine sniffly_hide_progress
+
+  ! Update progress bar and status text
+  ! fraction: 0.0 to 1.0
+  ! message: status text to show
+  subroutine sniffly_update_progress(fraction, message)
+    real(c_double), intent(in) :: fraction
+    character(len=*), intent(in) :: message
+    character(len=32) :: percent_str
+    integer :: percent_int
+
+    if (c_associated(progress_bar_ptr)) then
+      ! Update progress bar fraction
+      call gtk_progress_bar_set_fraction(progress_bar_ptr, fraction)
+
+      ! Set percentage text
+      percent_int = int(fraction * 100.0_c_double)
+      write(percent_str, '(I0,A)') percent_int, '%'
+      call gtk_progress_bar_set_text(progress_bar_ptr, trim(percent_str)//c_null_char)
+    end if
+
+    ! Update status label
+    if (c_associated(status_label_ptr)) then
+      call gtk_label_set_text(status_label_ptr, trim(message)//c_null_char)
+    end if
+
+    ! Note: We update widgets but GTK will handle rendering in its own event loop
+    ! Frequent calls to this function will keep the UI updated
+  end subroutine sniffly_update_progress
+
+  ! Callback wrapper for quit events (no arguments)
+  subroutine quit_callback_wrapper()
+    call sniffly_app_quit()
+  end subroutine quit_callback_wrapper
+
+  ! Idle callback for async initial scan
+  function perform_initial_scan(user_data) bind(c) result(continue)
+    use gtk, only: gtk_widget_queue_draw
+    use treemap_renderer, only: invalidate_layout
+    type(c_ptr), value :: user_data
+    integer(c_int) :: continue
+
+    print *, "Performing initial scan in idle callback..."
+    call scan_directory(pending_scan_path)
+
+    ! Mark initial scan as complete so draw callback can proceed
+    call mark_initial_scan_complete()
+
+    ! Invalidate layout to force recalculation
+    call invalidate_layout()
+
+    ! Update breadcrumbs after scan
+    call sniffly_update_breadcrumbs()
+
+    ! Trigger redraw to show the scanned data
+    if (c_associated(main_window_ptr)) then
+      call gtk_widget_queue_draw(main_window_ptr)
+    end if
+
+    ! Return 0 to indicate this callback should not be called again
+    continue = 0_c_int
+  end function perform_initial_scan
 
 end module gtk_app

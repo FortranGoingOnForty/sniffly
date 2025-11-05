@@ -9,6 +9,7 @@ module treemap_renderer
                    cairo_stroke, cairo_set_line_width, cairo_select_font_face, &
                    cairo_set_font_size, cairo_move_to, cairo_show_text, &
                    cairo_set_source_rgba
+  use g, only: g_main_context_default, g_main_context_iteration
   use iso_fortran_env, only: int64
   implicit none
   private
@@ -16,13 +17,41 @@ module treemap_renderer
   public :: scan_and_render, init_renderer, get_root_node, scan_and_render_with_hover, &
             scan_and_render_with_interaction, find_node_at_position, navigate_into_node, &
             navigate_up, get_breadcrumb_path, get_path_depth, get_node_count, &
-            get_node_center_by_index, find_node_in_direction
+            get_node_center_by_index, find_node_in_direction, register_progress_callback, &
+            scan_directory, invalidate_layout
+
+  ! Callback interfaces for progress updates
+  abstract interface
+    subroutine show_progress_callback()
+    end subroutine show_progress_callback
+
+    subroutine hide_progress_callback()
+    end subroutine hide_progress_callback
+
+    subroutine update_progress_callback(fraction, message)
+      use, intrinsic :: iso_c_binding
+      real(c_double), intent(in) :: fraction
+      character(len=*), intent(in) :: message
+    end subroutine update_progress_callback
+  end interface
+
+  ! Directory cache entry
+  type :: cache_entry
+    character(len=512) :: path
+    type(file_node), allocatable :: node
+    logical :: valid
+  end type cache_entry
 
   ! Global state
   type(file_node), save, target :: root_node
   type(file_node), pointer, save :: current_view_node => null()
   logical, save :: has_data = .false.
   character(len=512), save :: scanned_path = ""
+
+  ! Directory cache (stores scanned trees)
+  integer, parameter :: MAX_CACHE_SIZE = 50
+  type(cache_entry), dimension(MAX_CACHE_SIZE), save :: dir_cache
+  integer, save :: cache_count = 0
 
   ! Layout cache state
   logical, save :: layout_calculated = .false.
@@ -34,6 +63,11 @@ module treemap_renderer
   character(len=256), save :: path_names(MAX_PATH_DEPTH)
   integer, save :: path_depth = 0
 
+  ! Progress callback pointers
+  procedure(show_progress_callback), pointer, save :: show_progress_cb => null()
+  procedure(hide_progress_callback), pointer, save :: hide_progress_cb => null()
+  procedure(update_progress_callback), pointer, save :: update_progress_cb => null()
+
 contains
 
   ! Initialize renderer
@@ -41,6 +75,24 @@ contains
     has_data = .false.
     scanned_path = ""
   end subroutine init_renderer
+
+  ! Invalidate layout cache to force recalculation
+  subroutine invalidate_layout()
+    layout_calculated = .false.
+    print *, "Layout cache invalidated"
+  end subroutine invalidate_layout
+
+  ! Register progress callbacks
+  subroutine register_progress_callback(show_cb, hide_cb, update_cb)
+    procedure(show_progress_callback) :: show_cb
+    procedure(hide_progress_callback) :: hide_cb
+    procedure(update_progress_callback) :: update_cb
+
+    show_progress_cb => show_cb
+    hide_progress_cb => hide_cb
+    update_progress_cb => update_cb
+    print *, "Progress callbacks registered"
+  end subroutine register_progress_callback
 
   ! Get root node (for external access)
   function get_root_node() result(node_ptr)
@@ -50,18 +102,68 @@ contains
 
   ! Scan directory and prepare for rendering
   subroutine scan_directory(path)
+    use, intrinsic :: iso_c_binding
     character(len=*), intent(in) :: path
+    integer :: cache_index, i
+    character(len=512) :: status_msg
+    type(c_ptr) :: context
+    integer(c_int) :: events_processed
 
     print *, "Scanning: ", trim(path)
 
-    ! Scan the directory tree (recursively gets all files)
-    call build_tree(path, root_node)
-
-    ! Assign colors to nodes
-    call color_tree(root_node, 0)
-
-    scanned_path = trim(path)
+    ! Mark as having data IMMEDIATELY to prevent recursive scans
     has_data = .true.
+    scanned_path = trim(path)
+
+    ! Show progress bar and status
+    if (associated(show_progress_cb)) call show_progress_cb()
+
+    ! Process events to make widget visible
+    context = g_main_context_default()
+    do i = 1, 5
+      do while (g_main_context_iteration(context, 0_c_int) /= 0_c_int)
+      end do
+    end do
+
+    ! Now update with initial message
+    write(status_msg, '(A,A)') 'Scanning: ', trim(path)
+    if (associated(update_progress_cb)) call update_progress_cb(0.1_c_double, status_msg)
+
+    ! Process events again to show the update
+    do i = 1, 5
+      do while (g_main_context_iteration(context, 0_c_int) /= 0_c_int)
+      end do
+    end do
+
+    ! Check cache first
+    cache_index = cache_lookup(path)
+    if (cache_index > 0) then
+      ! Use cached scan (already colored)
+      if (associated(update_progress_cb)) call update_progress_cb(0.5_c_double, 'Loading from cache...')
+      ! Process events
+      do while (g_main_context_iteration(context, 0_c_int) /= 0_c_int)
+      end do
+      root_node = dir_cache(cache_index)%node
+    else
+      ! Scan the directory tree (recursively gets all files)
+      if (associated(update_progress_cb)) call update_progress_cb(0.3_c_double, 'Scanning directories...')
+      ! Process events
+      do while (g_main_context_iteration(context, 0_c_int) /= 0_c_int)
+      end do
+
+      call build_tree(path, root_node)
+
+      ! Assign colors to nodes BEFORE caching
+      if (associated(update_progress_cb)) call update_progress_cb(0.8_c_double, 'Assigning colors...')
+      ! Process events
+      do while (g_main_context_iteration(context, 0_c_int) /= 0_c_int)
+      end do
+
+      call color_tree(root_node, 0)
+
+      ! Store in cache (now with colors)
+      call cache_store(path, root_node)
+    end if
 
     ! Start view at root level (showing only top-level items)
     current_view_node => root_node
@@ -70,8 +172,19 @@ contains
     path_depth = 1
     path_names(1) = trim(scanned_path)
 
+    ! Update progress and hide progress bar
+    if (associated(update_progress_cb)) call update_progress_cb(1.0_c_double, 'Scan complete')
+    ! Process events one more time
+    do while (g_main_context_iteration(context, 0_c_int) /= 0_c_int)
+    end do
+
+    if (associated(hide_progress_cb)) call hide_progress_cb()
+
     print *, "Scan complete. Root size: ", root_node%size, " bytes"
     print *, "Children: ", root_node%num_children
+
+    ! Invalidate layout cache to force recalculation with new data
+    call invalidate_layout()
   end subroutine scan_directory
 
   ! Main rendering function
@@ -322,7 +435,7 @@ contains
     use file_system, only: get_path_separator
     integer, intent(in), optional :: levels
     integer :: levels_to_go
-    integer :: i, last_sep
+    integer :: i, last_sep, cache_index
     character(len=512) :: parent_path, current_root_path
     character(len=1) :: sep
     type(file_node), pointer :: temp_node
@@ -374,10 +487,9 @@ contains
 
         print *, "Re-scanning parent directory: ", trim(parent_path)
 
-        ! Re-scan parent directory
-        call build_tree(trim(parent_path), root_node)
-        current_view_node => root_node
-        has_data = .true.
+        ! Use scan_directory instead of build_tree to ensure colors are applied
+        ! and progress is shown
+        call scan_directory(trim(parent_path))
 
         ! Update path names
         path_depth = 1
@@ -711,9 +823,15 @@ contains
 
     ! Render only the direct children of the current view
     if (allocated(view_node%children)) then
+      print *, "DEBUG: Rendering", view_node%num_children, "children"
       do i = 1, view_node%num_children
+        print *, "DEBUG: Rendering child", i, "bounds:", &
+                 view_node%children(i)%bounds%x, view_node%children(i)%bounds%y, &
+                 view_node%children(i)%bounds%width, view_node%children(i)%bounds%height
         call render_node(cr, view_node%children(i))
       end do
+    else
+      print *, "DEBUG: view_node has NO children allocated!"
     end if
   end subroutine render_current_view
 
@@ -805,6 +923,47 @@ contains
       write(size_str, '(F0.1, A)') size_val, ' GB'
     end if
   end function format_size
+
+  ! Cache helper functions
+  ! Look up cached directory scan by path
+  function cache_lookup(path) result(found_index)
+    character(len=*), intent(in) :: path
+    integer :: found_index, i
+
+    found_index = 0
+    do i = 1, cache_count
+      if (dir_cache(i)%valid .and. trim(dir_cache(i)%path) == trim(path)) then
+        found_index = i
+        print *, "Cache hit for: ", trim(path)
+        return
+      end if
+    end do
+    print *, "Cache miss for: ", trim(path)
+  end function cache_lookup
+
+  ! Store scanned directory in cache
+  subroutine cache_store(path, node)
+    character(len=*), intent(in) :: path
+    type(file_node), intent(in) :: node
+    integer :: store_index
+
+    ! Simple strategy: if cache full, overwrite oldest (index 1)
+    if (cache_count < MAX_CACHE_SIZE) then
+      cache_count = cache_count + 1
+      store_index = cache_count
+    else
+      ! Cache full - simple FIFO: overwrite first entry
+      print *, "Cache full - evicting oldest entry"
+      store_index = 1
+    end if
+
+    ! Store in cache
+    dir_cache(store_index)%path = trim(path)
+    dir_cache(store_index)%node = node
+    dir_cache(store_index)%valid = .true.
+
+    print *, "Cached scan for: ", trim(path), " at index ", store_index
+  end subroutine cache_store
 
   ! Render text label for a node
   subroutine render_label(cr, node, x, y, w, h)
