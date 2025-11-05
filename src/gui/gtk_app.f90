@@ -13,12 +13,12 @@ module gtk_app
                  gtk_label_new, gtk_label_set_text, gtk_widget_set_halign, &
                  GTK_ALIGN_START
   use g, only: g_application_run
-  use treemap_widget, only: create_treemap_widget, set_scan_path
+  use treemap_widget, only: create_treemap_widget, set_scan_path, register_navigation_callback
   implicit none
   private
 
   public :: sniffly_app_run, sniffly_app_quit, sniffly_set_scan_path, &
-            sniffly_update_status, sniffly_update_breadcrumbs
+            sniffly_update_status, sniffly_update_breadcrumbs, breadcrumb_callback
 
   ! Application constants
   character(len=*), parameter :: APP_ID = "org.fortrangoingonforty.sniffly"
@@ -131,7 +131,7 @@ contains
 
     ! Create breadcrumb bar (horizontal box with path label)
     breadcrumb_bar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5_c_int)
-    breadcrumb_label_ptr = gtk_label_new("/"//c_null_char)
+    breadcrumb_label_ptr = gtk_label_new(""//c_null_char)  ! Will be set by first render
     call gtk_widget_set_halign(breadcrumb_label_ptr, GTK_ALIGN_START)
     call gtk_box_append(breadcrumb_bar, breadcrumb_label_ptr)
 
@@ -152,6 +152,12 @@ contains
 
     ! Set the scan path
     call set_scan_path(scan_path)
+
+    ! Register navigation callback for breadcrumb updates
+    call register_navigation_callback(breadcrumb_callback)
+
+    ! Initialize breadcrumb display (will update after first render)
+    call sniffly_update_breadcrumbs()
 
     ! Add drawing area to main box
     call gtk_box_append(main_box, drawing_area)
@@ -220,5 +226,10 @@ contains
     ! Update label
     call gtk_label_set_text(breadcrumb_label_ptr, trim(path_str)//c_null_char)
   end subroutine sniffly_update_breadcrumbs
+
+  ! Callback wrapper for navigation events (no arguments)
+  subroutine breadcrumb_callback()
+    call sniffly_update_breadcrumbs()
+  end subroutine breadcrumb_callback
 
 end module gtk_app
