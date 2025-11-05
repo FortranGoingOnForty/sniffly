@@ -14,10 +14,13 @@ module gtk_app
                  GTK_ALIGN_START, gtk_progress_bar_new, gtk_progress_bar_set_fraction, &
                  gtk_progress_bar_set_text, gtk_progress_bar_set_show_text, &
                  gtk_widget_set_visible, &
-                 gtk_button_new, gtk_button_set_icon_name
+                 gtk_button_new, gtk_button_set_icon_name, &
+                 gtk_entry_new, gtk_entry_buffer_set_text, gtk_entry_get_buffer, &
+                 gtk_editable_set_editable
   use g, only: g_application_run, g_idle_add
   use treemap_widget, only: create_treemap_widget, set_scan_path, register_navigation_callback, &
-                             register_key_handler, register_quit_callback, mark_initial_scan_complete
+                             register_key_handler, register_quit_callback, mark_initial_scan_complete, &
+                             has_selection, get_selected_node_path
   use treemap_renderer, only: register_progress_callback, scan_directory
   implicit none
   private
@@ -38,6 +41,7 @@ module gtk_app
   type(c_ptr), save :: status_label_ptr = c_null_ptr
   type(c_ptr), save :: breadcrumb_label_ptr = c_null_ptr
   type(c_ptr), save :: progress_bar_ptr = c_null_ptr
+  type(c_ptr), save :: path_entry_ptr = c_null_ptr
 
   ! Global scan path (can be set via command line)
   character(len=512), save :: global_scan_path = ""
@@ -92,7 +96,7 @@ contains
   ! Callback when application activates (startup)
   subroutine on_activate(app, user_data) bind(c)
     type(c_ptr), value :: app, user_data
-    type(c_ptr) :: drawing_area, main_box, toolbar, open_dir_btn, scan_btn, status_bar, breadcrumb_bar
+    type(c_ptr) :: drawing_area, main_box, toolbar, open_dir_btn, scan_btn, open_finder_btn, delete_btn, status_bar, breadcrumb_bar
     character(len=512) :: scan_path
     integer(c_int) :: idle_id
 
@@ -132,8 +136,15 @@ contains
                            c_funloc(on_open_dir_clicked), c_null_ptr)
     call gtk_box_append(toolbar, open_dir_btn)
 
-    ! Create Scan button
-    scan_btn = gtk_button_new_with_label("Scan"//c_null_char)
+    ! Create path display entry (read-only)
+    path_entry_ptr = gtk_entry_new()
+    call gtk_editable_set_editable(path_entry_ptr, 0_c_int)  ! Make read-only
+    call gtk_widget_set_hexpand(path_entry_ptr, 1_c_int)  ! Expand to fill space
+    call gtk_box_append(toolbar, path_entry_ptr)
+
+    ! Create Scan button with refresh icon
+    scan_btn = gtk_button_new()
+    call gtk_button_set_icon_name(scan_btn, "view-refresh"//c_null_char)
     call g_signal_connect(scan_btn, "clicked"//c_null_char, &
                            c_funloc(on_scan_clicked), c_null_ptr)
     call gtk_box_append(toolbar, scan_btn)
@@ -145,6 +156,20 @@ contains
     call gtk_widget_set_hexpand(progress_bar_ptr, 1_c_int)  ! Expand horizontally to fill space
     call gtk_progress_bar_set_fraction(progress_bar_ptr, 0.0_c_double)  ! Start at 0%
     call gtk_box_append(toolbar, progress_bar_ptr)
+
+    ! Create Open in Finder button (floated right after progress bar)
+    open_finder_btn = gtk_button_new()
+    call gtk_button_set_icon_name(open_finder_btn, "document-open"//c_null_char)
+    call g_signal_connect(open_finder_btn, "clicked"//c_null_char, &
+                           c_funloc(on_open_finder_clicked), c_null_ptr)
+    call gtk_box_append(toolbar, open_finder_btn)
+
+    ! Create Delete button (floated right after Open in Finder)
+    delete_btn = gtk_button_new()
+    call gtk_button_set_icon_name(delete_btn, "user-trash"//c_null_char)
+    call g_signal_connect(delete_btn, "clicked"//c_null_char, &
+                           c_funloc(on_delete_clicked), c_null_ptr)
+    call gtk_box_append(toolbar, delete_btn)
 
     ! Add toolbar to main box
     call gtk_box_append(main_box, toolbar)
@@ -172,6 +197,9 @@ contains
 
     ! Set the scan path
     call set_scan_path(scan_path)
+
+    ! Update path entry to show initial scan path
+    call update_path_entry(scan_path)
 
     ! Register navigation callback for breadcrumb updates
     call register_navigation_callback(breadcrumb_callback)
@@ -233,8 +261,12 @@ contains
       global_scan_path = selected_path
       call set_scan_path(selected_path)
 
-      ! TODO: Trigger rescan here
-      print *, "TODO: Trigger rescan of: ", trim(selected_path)
+      ! Update path display entry
+      call update_path_entry(selected_path)
+
+      ! Trigger rescan of new directory
+      print *, "Triggering rescan of: ", trim(selected_path)
+      call trigger_rescan(selected_path)
     else
       print *, "Directory selection cancelled or failed"
     end if
@@ -243,8 +275,85 @@ contains
   ! Callback when Scan button is clicked
   subroutine on_scan_clicked(button, user_data) bind(c)
     type(c_ptr), value :: button, user_data
-    print *, "Scan button clicked! (Directory chooser coming soon...)"
+    print *, "Scan button clicked! Rescanning current path..."
+
+    ! Trigger rescan of current path
+    if (len_trim(global_scan_path) > 0) then
+      call trigger_rescan(global_scan_path)
+    else
+      print *, "WARNING: No scan path set, cannot rescan"
+    end if
   end subroutine on_scan_clicked
+
+  ! Callback when Open in Finder button is clicked
+  subroutine on_open_finder_clicked(button, user_data) bind(c)
+    type(c_ptr), value :: button, user_data
+    character(len=:), allocatable :: selected_path
+
+    print *, "Open in Finder button clicked!"
+
+    ! Check if there's a selection
+    if (.not. has_selection()) then
+      print *, "No selection - cannot open in Finder"
+      return
+    end if
+
+    ! Get the selected node path
+    selected_path = get_selected_node_path()
+
+    if (len_trim(selected_path) == 0) then
+      print *, "Invalid selection path"
+      return
+    end if
+
+    print *, "Opening in Finder: ", trim(selected_path)
+    call open_in_file_manager(selected_path)
+  end subroutine on_open_finder_clicked
+
+  ! Callback when Delete button is clicked
+  subroutine on_delete_clicked(button, user_data) bind(c)
+    type(c_ptr), value :: button, user_data
+    character(len=:), allocatable :: selected_path
+    integer :: confirm_result
+
+    print *, "Delete button clicked!"
+
+    ! Check if there's a selection
+    if (.not. has_selection()) then
+      print *, "No selection - cannot delete"
+      return
+    end if
+
+    ! Get the selected node path
+    selected_path = get_selected_node_path()
+
+    if (len_trim(selected_path) == 0) then
+      print *, "Invalid selection path"
+      return
+    end if
+
+    print *, "Preparing to delete: ", trim(selected_path)
+
+    ! Show confirmation dialog
+    call show_delete_confirmation(selected_path, confirm_result)
+
+    if (confirm_result == 1) then
+      print *, "Delete confirmed - proceeding"
+      call delete_to_trash(selected_path)
+    else
+      print *, "Delete cancelled by user"
+    end if
+  end subroutine on_delete_clicked
+
+  ! Detect if we're running on macOS
+  function is_macos() result(is_mac)
+    logical :: is_mac
+    logical :: file_exists
+
+    ! Check for macOS-specific directory
+    inquire(file='/Applications', exist=file_exists)
+    is_mac = file_exists
+  end function is_macos
 
   ! Show native OS directory picker using system commands
   ! This is a workaround until GTK4 file dialog bindings are available
@@ -261,16 +370,16 @@ contains
     ! Create temp file for output
     temp_file = "/tmp/sniffly_picker.txt"
 
-    ! Platform-specific command
-#ifdef __APPLE__
-    ! macOS: Use osascript to show native folder picker
-    command = 'osascript -e ''POSIX path of (choose folder with prompt "Select directory to scan:")'' > ' &
-              // trim(temp_file) // ' 2>&1'
-#else
-    ! Linux: Try zenity, fallback to kdialog
-    command = 'zenity --file-selection --directory > ' // trim(temp_file) // &
-              ' 2>&1 || kdialog --getexistingdirectory . > ' // trim(temp_file) // ' 2>&1'
-#endif
+    ! Platform-specific command - detect at runtime
+    if (is_macos()) then
+      ! macOS: Use osascript to show native folder picker
+      command = 'osascript -e ''POSIX path of (choose folder with prompt "Select directory to scan:")'' > ' &
+                // trim(temp_file) // ' 2>&1'
+    else
+      ! Linux: Try zenity, fallback to kdialog
+      command = 'zenity --file-selection --directory > ' // trim(temp_file) // &
+                ' 2>&1 || kdialog --getexistingdirectory . > ' // trim(temp_file) // ' 2>&1'
+    end if
 
     print *, "Executing: ", trim(command)
 
@@ -304,6 +413,102 @@ contains
       status = 1
     end if
   end subroutine show_native_directory_picker
+
+  ! Update the path display entry with a new path
+  subroutine update_path_entry(path)
+    character(len=*), intent(in) :: path
+    type(c_ptr) :: buffer
+
+    if (.not. c_associated(path_entry_ptr)) return
+
+    ! Get the entry buffer and set the text
+    buffer = gtk_entry_get_buffer(path_entry_ptr)
+    call gtk_entry_buffer_set_text(buffer, trim(path)//c_null_char, &
+                                    int(len_trim(path), c_int))
+  end subroutine update_path_entry
+
+  ! Open a file or folder in the OS file manager (Finder on macOS, file browser on Linux)
+  subroutine open_in_file_manager(path)
+    character(len=*), intent(in) :: path
+    character(len=2048) :: command
+    integer :: status
+
+    if (is_macos()) then
+      ! macOS: Use 'open -R' to reveal in Finder
+      command = 'open -R "' // trim(path) // '"'
+    else
+      ! Linux: Use xdg-open to open in default file manager
+      command = 'xdg-open "' // trim(path) // '"'
+    end if
+
+    print *, "Executing: ", trim(command)
+    call execute_command_line(trim(command), exitstat=status)
+
+    if (status /= 0) then
+      print *, "Warning: Failed to open file manager (exit status: ", status, ")"
+    else
+      print *, "Successfully opened in file manager"
+    end if
+  end subroutine open_in_file_manager
+
+  ! Show native delete confirmation dialog using system commands
+  subroutine show_delete_confirmation(path, result)
+    character(len=*), intent(in) :: path
+    integer, intent(out) :: result
+    character(len=2048) :: command
+    integer :: status
+
+    result = 0  ! Default to cancel
+
+    if (is_macos()) then
+      ! macOS: Use osascript to show native dialog
+      command = 'osascript -e ''display dialog "Are you sure you want to delete:\n' &
+                // trim(path) // '\n\nThis will move the item to Trash." ' &
+                // 'buttons {"Cancel", "Delete"} default button "Cancel" ' &
+                // 'with icon caution'' > /dev/null 2>&1'
+    else
+      ! Linux: Use zenity for confirmation dialog
+      command = 'zenity --question --title="Confirm Delete" --text="Are you sure you want to delete:\n' &
+                // trim(path) // '\n\nThis will move the item to Trash." 2>&1'
+    end if
+
+    print *, "Showing confirmation dialog for: ", trim(path)
+    call execute_command_line(trim(command), exitstat=status)
+
+    ! Both macOS and Linux: exit status 0 means confirmed
+    if (status == 0) then
+      result = 1  ! Confirmed
+    end if
+
+    print *, "Confirmation result: ", result
+  end subroutine show_delete_confirmation
+
+  ! Delete file or folder to system trash (macOS/Linux)
+  subroutine delete_to_trash(path)
+    character(len=*), intent(in) :: path
+    character(len=2048) :: command
+    integer :: status
+
+    if (is_macos()) then
+      ! macOS: Use osascript to move to Trash via Finder
+      command = 'osascript -e ''tell application "Finder" to delete POSIX file "' &
+                // trim(path) // '"'' > /dev/null 2>&1'
+    else
+      ! Linux: Use gio trash (GNOME), fallback to trash-cli
+      command = 'gio trash "' // trim(path) // '" 2>&1 || trash "' // trim(path) // '" 2>&1'
+    end if
+
+    print *, "Deleting to trash: ", trim(path)
+    call execute_command_line(trim(command), exitstat=status)
+
+    if (status == 0) then
+      print *, "Successfully moved to trash: ", trim(path)
+      ! TODO: Trigger rescan to update the visualization
+    else
+      print *, "ERROR: Failed to move to trash (exit status: ", status, ")"
+      print *, "You may need to delete manually or check permissions"
+    end if
+  end subroutine delete_to_trash
 
   ! Update status bar with scan information
   subroutine sniffly_update_status(message)
@@ -433,6 +638,47 @@ contains
   subroutine quit_callback_wrapper()
     call sniffly_app_quit()
   end subroutine quit_callback_wrapper
+
+  ! Trigger a rescan of the given directory (for UI buttons)
+  subroutine trigger_rescan(path)
+    use gtk, only: gtk_widget_queue_draw
+    use g, only: g_main_context_default, g_main_context_iteration
+    use treemap_renderer, only: invalidate_layout
+    character(len=*), intent(in) :: path
+    type(c_ptr) :: context
+    integer :: i
+
+    print *, "Triggering rescan of: ", trim(path)
+
+    ! Process pending GTK events before starting scan
+    context = g_main_context_default()
+    do i = 1, 10
+      do while (g_main_context_iteration(context, 0_c_int) /= 0_c_int)
+      end do
+    end do
+
+    ! Scan the directory (this will show progress via callbacks)
+    call scan_directory(path)
+
+    ! Process events after scan to update UI
+    do i = 1, 10
+      do while (g_main_context_iteration(context, 0_c_int) /= 0_c_int)
+      end do
+    end do
+
+    ! Invalidate layout to force recalculation
+    call invalidate_layout()
+
+    ! Update breadcrumbs after scan
+    call sniffly_update_breadcrumbs()
+
+    ! Trigger redraw to show the scanned data
+    if (c_associated(main_window_ptr)) then
+      call gtk_widget_queue_draw(main_window_ptr)
+    end if
+
+    print *, "Rescan complete"
+  end subroutine trigger_rescan
 
   ! Idle callback for async initial scan
   function perform_initial_scan(user_data) bind(c) result(continue)

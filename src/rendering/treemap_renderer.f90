@@ -18,7 +18,7 @@ module treemap_renderer
             scan_and_render_with_interaction, find_node_at_position, navigate_into_node, &
             navigate_up, get_breadcrumb_path, get_path_depth, get_node_count, &
             get_node_center_by_index, find_node_in_direction, register_progress_callback, &
-            scan_directory, invalidate_layout
+            scan_directory, invalidate_layout, get_current_view_node
 
   ! Callback interfaces for progress updates
   abstract interface
@@ -99,6 +99,12 @@ contains
     type(file_node), pointer :: node_ptr
     node_ptr => root_node
   end function get_root_node
+
+  ! Get current view node (for external access)
+  function get_current_view_node() result(node_ptr)
+    type(file_node), pointer :: node_ptr
+    node_ptr => current_view_node
+  end function get_current_view_node
 
   ! Scan directory and prepare for rendering
   subroutine scan_directory(path)

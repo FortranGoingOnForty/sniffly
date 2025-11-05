@@ -7,12 +7,14 @@ module treemap_widget
                  gtk_widget_add_controller, g_signal_connect, &
                  gtk_gesture_click_new, gtk_widget_queue_draw, &
                  gtk_event_controller_key_new, gtk_widget_set_focusable
-  use treemap_renderer, only: scan_and_render, init_renderer, scan_and_render_with_hover
+  use treemap_renderer, only: scan_and_render, init_renderer, scan_and_render_with_hover, &
+                              get_current_view_node
   implicit none
   private
 
   public :: create_treemap_widget, set_scan_path, get_widget_ptr, register_navigation_callback, &
-            register_key_handler, register_quit_callback, mark_initial_scan_complete
+            register_key_handler, register_quit_callback, mark_initial_scan_complete, &
+            get_selected_node_path, has_selection
 
   ! Callback interface for navigation events
   abstract interface
@@ -400,5 +402,34 @@ contains
     end if
 
   end function on_key_press
+
+  ! Check if there is a selection
+  function has_selection() result(is_selected)
+    logical :: is_selected
+    is_selected = (selected_index > 0)
+  end function has_selection
+
+  ! Get the path of the currently selected node
+  function get_selected_node_path() result(path)
+    use types, only: file_node
+    character(len=:), allocatable :: path
+    type(file_node), pointer :: current_view
+
+    path = ""
+
+    ! Check if there is a selection
+    if (selected_index == 0) return
+
+    ! Get current view node from renderer
+    current_view => get_current_view_node()
+    if (.not. associated(current_view)) return
+
+    ! Check if the children array is allocated and index is valid
+    if (.not. allocated(current_view%children)) return
+    if (selected_index > current_view%num_children) return
+
+    ! Return the path of the selected child
+    path = trim(current_view%children(selected_index)%path)
+  end function get_selected_node_path
 
 end module treemap_widget
