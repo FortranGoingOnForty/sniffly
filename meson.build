@@ -79,9 +79,9 @@ layout_sources = [
 
 gui_sources = [
   # GTK4 interface
+  'src/gui/treemap_widget.f90',  # Must come before gtk_app (dependency)
   'src/gui/gtk_app.f90',
   # 'src/gui/main_window.f90',
-  # 'src/gui/treemap_widget.f90',
   # 'src/gui/toolbar.f90',
   # 'src/gui/statusbar.f90',
   # 'src/gui/dialogs.f90',
