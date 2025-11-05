@@ -14,7 +14,8 @@ module treemap_widget
 
   public :: create_treemap_widget, set_scan_path, get_widget_ptr, register_navigation_callback, &
             register_key_handler, register_quit_callback, register_delete_callback, &
-            mark_initial_scan_complete, get_selected_node_path, has_selection
+            mark_initial_scan_complete, get_selected_node_path, has_selection, get_selected_index, &
+            clear_selection
 
   ! Callback interface for navigation events
   abstract interface
@@ -457,5 +458,17 @@ contains
     ! Return the path of the selected child
     path = trim(current_view%children(selected_index)%path)
   end function get_selected_node_path
+
+  ! Get the index of the currently selected node
+  function get_selected_index() result(idx)
+    integer :: idx
+    idx = selected_index
+  end function get_selected_index
+
+  ! Clear the current selection
+  subroutine clear_selection()
+    selected_index = 0
+    print *, "Selection cleared"
+  end subroutine clear_selection
 
 end module treemap_widget

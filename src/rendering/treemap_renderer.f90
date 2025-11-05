@@ -18,7 +18,7 @@ module treemap_renderer
             scan_and_render_with_interaction, find_node_at_position, navigate_into_node, &
             navigate_up, get_breadcrumb_path, get_path_depth, get_node_count, &
             get_node_center_by_index, find_node_in_direction, register_progress_callback, &
-            scan_directory, invalidate_layout, get_current_view_node
+            scan_directory, invalidate_layout, get_current_view_node, remove_selected_node_from_view
 
   ! Callback interfaces for progress updates
   abstract interface
@@ -573,6 +573,39 @@ contains
       print *, "Current view: ", trim(current_view_node%path)
     end if
   end subroutine navigate_up
+
+  ! Remove selected node from view (after deletion)
+  ! This marks the node with size 0 so it won't be rendered
+  subroutine remove_selected_node_from_view(selected_index)
+    integer, intent(in) :: selected_index
+
+    print *, "Removing node from view: index=", selected_index
+
+    ! Validate inputs
+    if (.not. associated(current_view_node)) then
+      print *, "ERROR: No current view node"
+      return
+    end if
+
+    if (.not. allocated(current_view_node%children)) then
+      print *, "ERROR: Current node has no children"
+      return
+    end if
+
+    if (selected_index < 1 .or. selected_index > current_view_node%num_children) then
+      print *, "ERROR: Invalid selected index: ", selected_index
+      return
+    end if
+
+    ! Mark the node as deleted by setting its size to 0
+    ! This will cause the layout algorithm to skip it
+    current_view_node%children(selected_index)%size = 0_int64
+
+    print *, "Node marked as deleted (size = 0)"
+
+    ! Invalidate layout so it gets recalculated without this node
+    layout_calculated = .false.
+  end subroutine remove_selected_node_from_view
 
   ! Get current path depth
   function get_path_depth() result(depth)

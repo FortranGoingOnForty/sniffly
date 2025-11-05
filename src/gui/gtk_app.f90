@@ -323,9 +323,10 @@ contains
 
   ! Callback when Delete button is clicked
   subroutine on_delete_clicked(button, user_data) bind(c)
+    use treemap_widget, only: get_selected_index
     type(c_ptr), value :: button, user_data
     character(len=:), allocatable :: selected_path
-    integer :: confirm_result
+    integer :: confirm_result, selected_idx
 
     print *, "Delete button clicked!"
 
@@ -335,8 +336,9 @@ contains
       return
     end if
 
-    ! Get the selected node path
+    ! Get the selected node path and index
     selected_path = get_selected_node_path()
+    selected_idx = get_selected_index()
 
     if (len_trim(selected_path) == 0) then
       print *, "Invalid selection path"
@@ -350,7 +352,7 @@ contains
 
     if (confirm_result == 1) then
       print *, "Delete confirmed - proceeding"
-      call delete_to_trash(selected_path)
+      call delete_to_trash(selected_path, selected_idx)
     else
       print *, "Delete cancelled by user"
     end if
@@ -495,8 +497,12 @@ contains
   end subroutine show_delete_confirmation
 
   ! Delete file or folder to system trash (macOS/Linux)
-  subroutine delete_to_trash(path)
+  subroutine delete_to_trash(path, selected_idx)
+    use gtk, only: gtk_widget_queue_draw
+    use treemap_renderer, only: remove_selected_node_from_view, invalidate_layout
+    use treemap_widget, only: clear_selection
     character(len=*), intent(in) :: path
+    integer, intent(in) :: selected_idx
     character(len=2048) :: command
     integer :: status
 
@@ -515,13 +521,21 @@ contains
     if (status == 0) then
       print *, "Successfully moved to trash: ", trim(path)
 
-      ! Trigger rescan to update the visualization
-      if (len_trim(global_scan_path) > 0) then
-        print *, "Rescanning after delete: ", trim(global_scan_path)
-        call trigger_rescan(global_scan_path)
-      else
-        print *, "WARNING: No scan path set, cannot rescan after delete"
+      ! Clear the selection first (before modifying tree)
+      call clear_selection()
+
+      ! Remove the node from the current view by marking it as deleted
+      call remove_selected_node_from_view(selected_idx)
+
+      ! Force layout recalculation
+      call invalidate_layout()
+
+      ! Trigger redraw to show the updated view
+      if (c_associated(main_window_ptr)) then
+        call gtk_widget_queue_draw(main_window_ptr)
       end if
+
+      print *, "View updated - deleted node removed"
     else
       print *, "ERROR: Failed to move to trash (exit status: ", status, ")"
       print *, "You may need to delete manually or check permissions"
@@ -664,8 +678,9 @@ contains
 
   ! Callback wrapper for delete events (no arguments)
   subroutine delete_callback_wrapper()
+    use treemap_widget, only: get_selected_index
     character(len=:), allocatable :: selected_path
-    integer :: confirm_result
+    integer :: confirm_result, selected_idx
 
     print *, "Delete callback triggered from keyboard"
 
@@ -675,8 +690,9 @@ contains
       return
     end if
 
-    ! Get the selected node path
+    ! Get the selected node path and index
     selected_path = get_selected_node_path()
+    selected_idx = get_selected_index()
 
     if (len_trim(selected_path) == 0) then
       print *, "Invalid selection path"
@@ -690,7 +706,7 @@ contains
 
     if (confirm_result == 1) then
       print *, "Delete confirmed - proceeding"
-      call delete_to_trash(selected_path)
+      call delete_to_trash(selected_path, selected_idx)
     else
       print *, "Delete cancelled by user"
     end if
