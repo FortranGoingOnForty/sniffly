@@ -67,8 +67,8 @@ gtk-fortran/
 # Debug files
 *.dSYM/
 vgcore.*
-core
-core.*
+/core
+/core.*
 
 # Coverage
 *.gcda
