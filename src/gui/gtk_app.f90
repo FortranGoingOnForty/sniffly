@@ -13,7 +13,8 @@ module gtk_app
                  gtk_label_new, gtk_label_set_text, gtk_widget_set_halign, &
                  GTK_ALIGN_START
   use g, only: g_application_run
-  use treemap_widget, only: create_treemap_widget, set_scan_path, register_navigation_callback
+  use treemap_widget, only: create_treemap_widget, set_scan_path, register_navigation_callback, &
+                             register_key_handler
   implicit none
   private
 
@@ -173,6 +174,9 @@ contains
 
     ! Add main box to window
     call gtk_window_set_child(main_window_ptr, main_box)
+
+    ! Register keyboard handler on window (not widget) for global keyboard capture
+    call register_key_handler(main_window_ptr)
 
     ! Show the window
     call gtk_window_present(main_window_ptr)

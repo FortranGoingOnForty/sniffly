@@ -11,7 +11,8 @@ module treemap_widget
   implicit none
   private
 
-  public :: create_treemap_widget, set_scan_path, get_widget_ptr, register_navigation_callback
+  public :: create_treemap_widget, set_scan_path, get_widget_ptr, register_navigation_callback, &
+            register_key_handler
 
   ! Callback interface for navigation events
   abstract interface
@@ -87,14 +88,23 @@ contains
                            c_funloc(on_click), c_null_ptr)
     call gtk_widget_add_controller(widget, click_controller)
 
-    ! Add keyboard event controller for navigation
+    print *, "Treemap widget created successfully"
+  end function create_treemap_widget
+
+  ! Register keyboard handler (called from gtk_app after window is created)
+  subroutine register_key_handler(window)
+    use gtk, only: gtk_event_controller_key_new, g_signal_connect, gtk_widget_add_controller
+    type(c_ptr), value :: window
+    type(c_ptr) :: key_controller
+
+    ! Add keyboard event controller to window for navigation
     key_controller = gtk_event_controller_key_new()
     call g_signal_connect(key_controller, "key-pressed"//c_null_char, &
                            c_funloc(on_key_press), c_null_ptr)
-    call gtk_widget_add_controller(widget, key_controller)
+    call gtk_widget_add_controller(window, key_controller)
 
-    print *, "Treemap widget created successfully"
-  end function create_treemap_widget
+    print *, "Key handler registered on window"
+  end subroutine register_key_handler
 
   ! Get widget pointer (for triggering redraws)
   function get_widget_ptr() result(ptr)
@@ -196,7 +206,8 @@ contains
 
   ! Keyboard callback - handle all keyboard navigation
   function on_key_press(controller, keyval, keycode, state, user_data) bind(c) result(handled)
-    use treemap_renderer, only: navigate_up, navigate_into_node, get_node_count, get_node_center_by_index
+    use treemap_renderer, only: navigate_up, navigate_into_node, get_node_count, &
+                                get_node_center_by_index, find_node_in_direction
     type(c_ptr), value :: controller, user_data
     integer(c_int), value :: keyval, keycode, state
     integer(c_int) :: handled
@@ -205,7 +216,7 @@ contains
 
     handled = 0_c_int  ! Default: not handled
 
-    ! Arrow keys: Navigate through nodes
+    ! Arrow keys: Navigate through nodes using spatial navigation
     if (keyval == GDK_KEY_Left .or. keyval == GDK_KEY_Right .or. &
         keyval == GDK_KEY_Up .or. keyval == GDK_KEY_Down) then
 
@@ -215,26 +226,23 @@ contains
       node_count = get_node_count()
 
       if (node_count > 0) then
-        ! Initialize keyboard hover if needed
-        if (keyboard_hover_index == 0) then
-          keyboard_hover_index = 1
-        else
-          ! Move keyboard hover based on arrow key
-          if (keyval == GDK_KEY_Right .or. keyval == GDK_KEY_Down) then
-            keyboard_hover_index = keyboard_hover_index + 1
-            if (keyboard_hover_index > node_count) keyboard_hover_index = 1  ! Wrap around
-          else if (keyval == GDK_KEY_Left .or. keyval == GDK_KEY_Up) then
-            keyboard_hover_index = keyboard_hover_index - 1
-            if (keyboard_hover_index < 1) keyboard_hover_index = node_count  ! Wrap around
-          end if
+        ! Determine direction: 1=up, 2=down, 3=left, 4=right
+        if (keyval == GDK_KEY_Up) then
+          keyboard_hover_index = find_node_in_direction(mouse_x, mouse_y, 1)
+        else if (keyval == GDK_KEY_Down) then
+          keyboard_hover_index = find_node_in_direction(mouse_x, mouse_y, 2)
+        else if (keyval == GDK_KEY_Left) then
+          keyboard_hover_index = find_node_in_direction(mouse_x, mouse_y, 3)
+        else if (keyval == GDK_KEY_Right) then
+          keyboard_hover_index = find_node_in_direction(mouse_x, mouse_y, 4)
         end if
 
-        ! Update mouse position to match keyboard hover for seamless transition
-        call get_node_center_by_index(keyboard_hover_index, mouse_x, mouse_y, success)
-        if (success) then
-          print *, "Arrow key - keyboard hover index: ", keyboard_hover_index, " at (", mouse_x, ",", mouse_y, ")"
-        else
-          print *, "Arrow key - failed to get node center for index: ", keyboard_hover_index
+        ! Update mouse position to center of selected node for seamless transition
+        if (keyboard_hover_index > 0) then
+          call get_node_center_by_index(keyboard_hover_index, mouse_x, mouse_y, success)
+          if (success) then
+            print *, "Arrow key - moved to node ", keyboard_hover_index, " at (", mouse_x, ",", mouse_y, ")"
+          end if
         end if
       end if
 

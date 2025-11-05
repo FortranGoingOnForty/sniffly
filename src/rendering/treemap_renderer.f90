@@ -16,7 +16,7 @@ module treemap_renderer
   public :: scan_and_render, init_renderer, get_root_node, scan_and_render_with_hover, &
             scan_and_render_with_interaction, find_node_at_position, navigate_into_node, &
             navigate_up, get_breadcrumb_path, get_path_depth, get_node_count, &
-            get_node_center_by_index
+            get_node_center_by_index, find_node_in_direction
 
   ! Global state
   type(file_node), save, target :: root_node
@@ -394,6 +394,73 @@ contains
 
     success = .true.
   end subroutine get_node_center_by_index
+
+  ! Find the best node in a given direction from current position
+  ! direction: 1=up, 2=down, 3=left, 4=right
+  function find_node_in_direction(from_x, from_y, direction) result(best_index)
+    use iso_fortran_env, only: real64
+    real(c_double), intent(in) :: from_x, from_y
+    integer, intent(in) :: direction
+    integer :: best_index
+    integer :: i
+    real(real64) :: cx, cy, dx, dy, dist, score, best_score
+    real(real64) :: directional_component, perpendicular_component
+
+    best_index = 0
+    best_score = 1.0d20  ! Large number
+
+    if (.not. associated(current_view_node)) return
+    if (current_view_node%num_children == 0) return
+
+    ! For each child node, calculate score based on direction
+    do i = 1, current_view_node%num_children
+      ! Get center of this node
+      cx = real(current_view_node%children(i)%bounds%x, real64) + &
+           real(current_view_node%children(i)%bounds%width, real64) / 2.0d0
+      cy = real(current_view_node%children(i)%bounds%y, real64) + &
+           real(current_view_node%children(i)%bounds%height, real64) / 2.0d0
+
+      dx = cx - real(from_x, real64)
+      dy = cy - real(from_y, real64)
+
+      ! Check if node is in the correct direction
+      select case (direction)
+      case (1)  ! Up
+        if (dy >= 0.0d0) cycle  ! Skip nodes below or at same level
+        directional_component = abs(dy)  ! Distance upward
+        perpendicular_component = abs(dx)  ! Horizontal offset
+      case (2)  ! Down
+        if (dy <= 0.0d0) cycle  ! Skip nodes above or at same level
+        directional_component = abs(dy)  ! Distance downward
+        perpendicular_component = abs(dx)  ! Horizontal offset
+      case (3)  ! Left
+        if (dx >= 0.0d0) cycle  ! Skip nodes to right or at same position
+        directional_component = abs(dx)  ! Distance leftward
+        perpendicular_component = abs(dy)  ! Vertical offset
+      case (4)  ! Right
+        if (dx <= 0.0d0) cycle  ! Skip nodes to left or at same position
+        directional_component = abs(dx)  ! Distance rightward
+        perpendicular_component = abs(dy)  ! Vertical offset
+      case default
+        cycle
+      end select
+
+      ! Score: prioritize alignment (low perpendicular) and closeness (low directional)
+      ! Weight perpendicular offset more heavily to prefer aligned nodes
+      score = directional_component + perpendicular_component * 2.0d0
+
+      if (score < best_score) then
+        best_score = score
+        best_index = i
+      end if
+    end do
+
+    ! If no node found in direction, wrap to closest node in any direction
+    if (best_index == 0 .and. current_view_node%num_children > 0) then
+      best_index = 1  ! Default to first node
+    end if
+
+  end function find_node_in_direction
 
   ! Render hover highlight overlay
   subroutine render_hover_highlight(cr, node)
