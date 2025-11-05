@@ -5,12 +5,17 @@ module treemap_widget
   use gtk, only: gtk_drawing_area_new, gtk_drawing_area_set_draw_func, &
                  gtk_widget_set_size_request, gtk_event_controller_motion_new, &
                  gtk_widget_add_controller, g_signal_connect, &
-                 gtk_gesture_click_new, gtk_widget_queue_draw
+                 gtk_gesture_click_new, gtk_widget_queue_draw, &
+                 gtk_event_controller_key_new, gtk_widget_set_focusable
   use treemap_renderer, only: scan_and_render, init_renderer, scan_and_render_with_hover
   implicit none
   private
 
   public :: create_treemap_widget, set_scan_path, get_widget_ptr
+
+  ! GDK Key constants
+  integer(c_int), parameter :: GDK_KEY_Return = 65293_c_int      ! Enter key
+  integer(c_int), parameter :: GDK_KEY_BackSpace = 65288_c_int   ! Backspace key
 
   ! Widget state (will expand later)
   type(c_ptr), save :: widget_ptr = c_null_ptr
@@ -27,7 +32,7 @@ contains
 
   ! Create and initialize the treemap drawing area widget
   function create_treemap_widget() result(widget)
-    type(c_ptr) :: widget, motion_controller, click_controller
+    type(c_ptr) :: widget, motion_controller, click_controller, key_controller
 
     ! Initialize renderer
     call init_renderer()
@@ -43,6 +48,9 @@ contains
 
     ! Set minimum size (will expand to fill window)
     call gtk_widget_set_size_request(widget, 800_c_int, 600_c_int)
+
+    ! Make widget focusable to receive keyboard events
+    call gtk_widget_set_focusable(widget, 1_c_int)
 
     ! Set draw function (called when widget needs to redraw)
     call gtk_drawing_area_set_draw_func(widget, &
@@ -61,6 +69,12 @@ contains
     call g_signal_connect(click_controller, "pressed"//c_null_char, &
                            c_funloc(on_click), c_null_ptr)
     call gtk_widget_add_controller(widget, click_controller)
+
+    ! Add keyboard event controller for navigation
+    key_controller = gtk_event_controller_key_new()
+    call g_signal_connect(key_controller, "key-pressed"//c_null_char, &
+                           c_funloc(on_key_press), c_null_ptr)
+    call gtk_widget_add_controller(widget, key_controller)
 
     print *, "Treemap widget created successfully"
   end function create_treemap_widget
@@ -111,6 +125,8 @@ contains
         print *, "Double-click detected! Navigating into node: ", clicked_index
         call navigate_into_node(clicked_index)
         selected_index = 0  ! Clear selection after navigation
+
+        ! Note: Breadcrumbs will be updated on next redraw
       else
         ! Single click: just select
         selected_index = clicked_index
@@ -144,7 +160,50 @@ contains
                                              selected_index)
     end if
 
+    ! TODO: Update breadcrumbs (need callback mechanism to avoid circular dependency)
+
     print *, "Rendered treemap: ", width, "x", height
   end subroutine on_draw
+
+  ! Keyboard callback - handle Backspace (up) and Enter (navigate in)
+  function on_key_press(controller, keyval, keycode, state, user_data) bind(c) result(handled)
+    use treemap_renderer, only: navigate_up, navigate_into_node
+    type(c_ptr), value :: controller, user_data
+    integer(c_int), value :: keyval, keycode, state
+    integer(c_int) :: handled
+
+    handled = 0_c_int  ! Default: not handled
+
+    ! Backspace: Navigate up one level
+    if (keyval == GDK_KEY_BackSpace) then
+      print *, "Backspace pressed - navigating up"
+      call navigate_up(1)  ! Go up one level
+
+      ! Trigger redraw
+      if (c_associated(widget_ptr)) then
+        call gtk_widget_queue_draw(widget_ptr)
+      end if
+
+      handled = 1_c_int  ! Handled
+
+    ! Enter: Navigate into selected directory
+    else if (keyval == GDK_KEY_Return) then
+      if (selected_index > 0) then
+        print *, "Enter pressed - navigating into selected node: ", selected_index
+        call navigate_into_node(selected_index)
+        selected_index = 0  ! Clear selection after navigation
+
+        ! Trigger redraw
+        if (c_associated(widget_ptr)) then
+          call gtk_widget_queue_draw(widget_ptr)
+        end if
+
+        handled = 1_c_int  ! Handled
+      else
+        print *, "Enter pressed but nothing selected"
+      end if
+    end if
+
+  end function on_key_press
 
 end module treemap_widget
