@@ -7,7 +7,7 @@ module disk_scanner
   implicit none
   private
 
-  public :: scan_directory, build_tree, calculate_sizes, dump_tree_debug
+  public :: scan_directory, build_tree, calculate_sizes, dump_tree_debug, set_progress_callback
 
   ! Directories to skip (reduce scan time and avoid issues)
   character(len=*), parameter, dimension(7) :: SKIP_DIRS = &
@@ -21,7 +21,25 @@ module disk_scanner
   integer, parameter :: DIRS_PER_UI_UPDATE = 10
   integer, save :: dir_scan_counter = 0
 
+  ! Progress callback interface
+  abstract interface
+    subroutine progress_update_callback(fraction, message)
+      use, intrinsic :: iso_c_binding
+      real(c_double), intent(in) :: fraction
+      character(len=*), intent(in) :: message
+    end subroutine progress_update_callback
+  end interface
+
+  ! Progress callback pointer
+  procedure(progress_update_callback), pointer, save :: progress_cb => null()
+
 contains
+
+  ! Set progress callback
+  subroutine set_progress_callback(callback)
+    procedure(progress_update_callback) :: callback
+    progress_cb => callback
+  end subroutine set_progress_callback
 
   ! Check if directory should be skipped
   function should_skip_dir(dirname) result(skip)
@@ -172,6 +190,17 @@ contains
       context = g_main_context_default()
       do while (g_main_context_iteration(context, 0_c_int) /= 0_c_int)
       end do
+
+      ! Update progress - estimate based on directories scanned
+      ! Progress range: 0.3 to 0.80 (before color assignment at 0.85)
+      if (associated(progress_cb) .and. dir_scan_counter > 0) then
+        ! Logarithmic progress for better perceived speed
+        ! log(60000)/11 ≈ 1.0, so this reaches ~80% after 60000 directories
+        ! This prevents saturation at 80% for large directories like ~
+        call progress_cb(0.3_c_double + 0.50_c_double * min(1.0_c_double, &
+                        log(real(dir_scan_counter, c_double)) / 11.0_c_double), &
+                        'Scanning directories...')
+      end if
     end if
 
     ! Increment directory counter

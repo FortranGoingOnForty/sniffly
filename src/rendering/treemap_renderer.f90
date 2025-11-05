@@ -103,6 +103,7 @@ contains
   ! Scan directory and prepare for rendering
   subroutine scan_directory(path)
     use, intrinsic :: iso_c_binding
+    use disk_scanner, only: set_progress_callback
     character(len=*), intent(in) :: path
     integer :: cache_index, i
     character(len=512) :: status_msg
@@ -114,6 +115,11 @@ contains
     ! Mark as having data IMMEDIATELY to prevent recursive scans
     has_data = .true.
     scanned_path = trim(path)
+
+    ! Register progress callback with disk_scanner
+    if (associated(update_progress_cb)) then
+      call set_progress_callback(update_progress_cb)
+    end if
 
     ! Show progress bar and status
     if (associated(show_progress_cb)) call show_progress_cb()
@@ -154,7 +160,7 @@ contains
       call build_tree(path, root_node)
 
       ! Assign colors to nodes BEFORE caching
-      if (associated(update_progress_cb)) call update_progress_cb(0.8_c_double, 'Assigning colors...')
+      if (associated(update_progress_cb)) call update_progress_cb(0.85_c_double, 'Assigning colors...')
       ! Process events
       do while (g_main_context_iteration(context, 0_c_int) /= 0_c_int)
       end do
