@@ -5,8 +5,9 @@ module gtk_app
   use gtk, only: gtk_init, gtk_application_new, gtk_application_window_new, &
                  gtk_window_set_title, gtk_window_set_default_size, &
                  gtk_window_present, G_APPLICATION_DEFAULT_FLAGS, &
-                 gtk_application_get_active_window, gtk_window_destroy
-  use g, only: g_application_run, g_signal_connect
+                 gtk_application_get_active_window, gtk_window_destroy, &
+                 g_signal_connect
+  use g, only: g_application_run
   implicit none
   private
 
