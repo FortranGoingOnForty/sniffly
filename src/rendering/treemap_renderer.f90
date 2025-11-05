@@ -525,22 +525,49 @@ contains
     ! Go up the specified number of levels
     path_depth = max(1, path_depth - levels_to_go)
 
-    ! Navigate back up to the correct node
-    temp_node => root_node
-    do i = 2, path_depth
-      ! Find child matching path_names(i)
-      ! For now, just go to root if depth = 1
-      if (path_depth == 1) then
-        temp_node => root_node
-        exit
-      end if
-    end do
-    current_view_node => temp_node
+    ! Navigate back up to the correct node by traversing from root
+    current_view_node => root_node
+
+    ! If we're deeper than root, traverse down to the correct node
+    if (path_depth > 1) then
+      do i = 2, path_depth
+        ! Find child matching path_names(i)
+        if (.not. allocated(current_view_node%children)) then
+          print *, "ERROR: Cannot navigate - current node has no children"
+          current_view_node => root_node
+          path_depth = 1
+          exit
+        end if
+
+        ! Search for matching child by name
+        temp_node => null()
+        do cache_index = 1, current_view_node%num_children
+          if (allocated(current_view_node%children(cache_index)%name)) then
+            if (trim(current_view_node%children(cache_index)%name) == trim(path_names(i))) then
+              temp_node => current_view_node%children(cache_index)
+              exit
+            end if
+          end if
+        end do
+
+        if (associated(temp_node)) then
+          current_view_node => temp_node
+        else
+          print *, "WARNING: Could not find child for path: ", trim(path_names(i))
+          current_view_node => root_node
+          path_depth = 1
+          exit
+        end if
+      end do
+    end if
 
     ! Reset layout cache
     layout_calculated = .false.
 
     print *, "Navigated up to depth: ", path_depth
+    if (allocated(current_view_node%path)) then
+      print *, "Current view: ", trim(current_view_node%path)
+    end if
   end subroutine navigate_up
 
   ! Get current path depth
@@ -828,13 +855,16 @@ contains
 
   ! Render only the current view (direct children only, no recursion)
   subroutine render_current_view(cr, view_node, bounds)
+    use cairo, only: cairo_set_source_rgb, cairo_move_to, cairo_show_text, &
+                     cairo_set_font_size, cairo_select_font_face
     type(c_ptr), intent(in) :: cr
     type(file_node), intent(in) :: view_node
     type(rect), intent(in) :: bounds
     integer :: i
+    real(c_double) :: center_x, center_y
 
     ! Render only the direct children of the current view
-    if (allocated(view_node%children)) then
+    if (allocated(view_node%children) .and. view_node%num_children > 0) then
       print *, "DEBUG: Rendering", view_node%num_children, "children"
       do i = 1, view_node%num_children
         print *, "DEBUG: Rendering child", i, "bounds:", &
@@ -843,7 +873,26 @@ contains
         call render_node(cr, view_node%children(i))
       end do
     else
-      print *, "DEBUG: view_node has NO children allocated!"
+      ! Empty directory - show warning message
+      print *, "DEBUG: Empty directory - showing warning"
+
+      ! Draw warning text in center
+      center_x = real(bounds%width, c_double) / 2.0_c_double
+      center_y = real(bounds%height, c_double) / 2.0_c_double
+
+      ! Set color to yellow/orange for warning
+      call cairo_set_source_rgb(cr, 0.9_c_double, 0.6_c_double, 0.0_c_double)
+      ! cairo font: family, slant (0=normal), weight (1=bold)
+      call cairo_select_font_face(cr, "Sans"//c_null_char, 0_c_int, 1_c_int)
+      call cairo_set_font_size(cr, 24.0_c_double)
+
+      ! Center the text (approximate)
+      call cairo_move_to(cr, center_x - 100.0_c_double, center_y - 30.0_c_double)
+      call cairo_show_text(cr, "Empty Directory"//c_null_char)
+
+      call cairo_set_font_size(cr, 14.0_c_double)
+      call cairo_move_to(cr, center_x - 120.0_c_double, center_y + 10.0_c_double)
+      call cairo_show_text(cr, "Press Backspace to go up"//c_null_char)
     end if
   end subroutine render_current_view
 

@@ -256,7 +256,8 @@ contains
   end subroutine on_draw
 
   ! Keyboard callback - handle all keyboard navigation
-  function on_key_press(controller, keyval, keycode, state, user_data) bind(c) result(handled)
+  ! NOTE: MUST be recursive because GTK event processing can trigger nested calls
+  recursive function on_key_press(controller, keyval, keycode, state, user_data) bind(c) result(handled)
     use treemap_renderer, only: navigate_up, navigate_into_node, get_node_count, &
                                 get_node_center_by_index, find_node_in_direction, &
                                 find_node_at_position

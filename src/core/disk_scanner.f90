@@ -234,6 +234,7 @@ contains
 
       ! List directory contents (returns 0 on error/permission denied)
       num_entries = list_directory(path, entries, MAX_FILES_PER_DIR)
+      print *, "DEBUG: list_directory('", trim(path), "') returned ", num_entries, " entries"
 
       ! If we got entries, scan them
       if (num_entries > 0) then

@@ -257,16 +257,21 @@ contains
     if (status == 0 .and. len_trim(selected_path) > 0) then
       print *, "Selected directory: ", trim(selected_path)
 
-      ! Update global scan path
-      global_scan_path = selected_path
-      call set_scan_path(selected_path)
+      ! Update global scan path (but don't scan yet)
+      ! Remove trailing slash if present (C code doesn't like it)
+      if (len_trim(selected_path) > 1 .and. selected_path(len_trim(selected_path):len_trim(selected_path)) == '/') then
+        global_scan_path = selected_path(1:len_trim(selected_path)-1)
+        print *, "DEBUG: Removed trailing slash from path"
+      else
+        global_scan_path = selected_path
+      end if
+      print *, "DEBUG: Set global_scan_path to: '", trim(global_scan_path), "'"
+      call set_scan_path(trim(global_scan_path))
 
       ! Update path display entry
-      call update_path_entry(selected_path)
+      call update_path_entry(trim(global_scan_path))
 
-      ! Trigger rescan of new directory
-      print *, "Triggering rescan of: ", trim(selected_path)
-      call trigger_rescan(selected_path)
+      print *, "Path updated. Click Scan button to scan: ", trim(global_scan_path)
     else
       print *, "Directory selection cancelled or failed"
     end if
@@ -276,9 +281,12 @@ contains
   subroutine on_scan_clicked(button, user_data) bind(c)
     type(c_ptr), value :: button, user_data
     print *, "Scan button clicked! Rescanning current path..."
+    print *, "DEBUG: global_scan_path = '", trim(global_scan_path), "'"
+    print *, "DEBUG: len_trim(global_scan_path) = ", len_trim(global_scan_path)
 
     ! Trigger rescan of current path
     if (len_trim(global_scan_path) > 0) then
+      print *, "DEBUG: Calling trigger_rescan with path: ", trim(global_scan_path)
       call trigger_rescan(global_scan_path)
     else
       print *, "WARNING: No scan path set, cannot rescan"
@@ -535,6 +543,11 @@ contains
     ! Get breadcrumb path from renderer
     call get_breadcrumb_path(names, count)
     print *, "Updating breadcrumbs: count=", count
+    if (count > 0) then
+      print *, "  First path name: '", trim(names(1)), "'"
+    else
+      print *, "  WARNING: count is 0!"
+    end if
 
     ! Get home directory from environment
     call get_environment_variable("HOME", home_dir)
@@ -645,10 +658,23 @@ contains
     use g, only: g_main_context_default, g_main_context_iteration
     use treemap_renderer, only: invalidate_layout
     character(len=*), intent(in) :: path
+    character(len=:), allocatable :: normalized_path
     type(c_ptr) :: context
     integer :: i
+    integer :: path_len
 
-    print *, "Triggering rescan of: ", trim(path)
+    print *, "=== TRIGGER_RESCAN ENTERED ==="
+    print *, "Triggering rescan of: '", trim(path), "'"
+    print *, "Path length: ", len_trim(path)
+
+    ! Remove trailing slash if present (C code doesn't like it)
+    path_len = len_trim(path)
+    if (path_len > 1 .and. path(path_len:path_len) == '/') then
+      normalized_path = trim(path(1:path_len-1))
+      print *, "DEBUG: Removed trailing slash. New path: '", normalized_path, "'"
+    else
+      normalized_path = trim(path)
+    end if
 
     ! Process pending GTK events before starting scan
     context = g_main_context_default()
@@ -657,8 +683,10 @@ contains
       end do
     end do
 
+    print *, "=== ABOUT TO CALL scan_directory ==="
     ! Scan the directory (this will show progress via callbacks)
-    call scan_directory(path)
+    call scan_directory(normalized_path)
+    print *, "=== RETURNED FROM scan_directory ==="
 
     ! Process events after scan to update UI
     do i = 1, 10
@@ -677,7 +705,7 @@ contains
       call gtk_widget_queue_draw(main_window_ptr)
     end if
 
-    print *, "Rescan complete"
+    print *, "=== RESCAN COMPLETE ==="
   end subroutine trigger_rescan
 
   ! Idle callback for async initial scan
