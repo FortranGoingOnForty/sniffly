@@ -6,8 +6,9 @@ module gtk_app
                  gtk_window_set_title, gtk_window_set_default_size, &
                  gtk_window_present, G_APPLICATION_DEFAULT_FLAGS, &
                  gtk_application_get_active_window, gtk_window_destroy, &
-                 g_signal_connect
+                 gtk_window_set_child, g_signal_connect
   use g, only: g_application_run
+  use treemap_widget, only: create_treemap_widget
   implicit none
   private
 
@@ -63,6 +64,7 @@ contains
   ! Callback when application activates (startup)
   subroutine on_activate(app, user_data) bind(c)
     type(c_ptr), value :: app, user_data
+    type(c_ptr) :: drawing_area
 
     ! Create main window
     main_window_ptr = gtk_application_window_new(app)
@@ -78,8 +80,19 @@ contains
                                       int(DEFAULT_WIDTH, c_int), &
                                       int(DEFAULT_HEIGHT, c_int))
 
-    ! TODO: Add menu bar, toolbar, drawing area, status bar
-    ! For now, just show empty window
+    ! Create treemap drawing area widget
+    drawing_area = create_treemap_widget()
+
+    if (.not. c_associated(drawing_area)) then
+      print *, "ERROR: Failed to create treemap widget"
+      return
+    end if
+
+    ! Add drawing area to window
+    call gtk_window_set_child(main_window_ptr, drawing_area)
+
+    ! TODO: Add menu bar, toolbar, status bar
+    ! For now, just show window with drawing area
 
     ! Show the window
     call gtk_window_present(main_window_ptr)
