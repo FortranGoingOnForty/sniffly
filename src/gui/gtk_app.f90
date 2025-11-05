@@ -6,13 +6,19 @@ module gtk_app
                  gtk_window_set_title, gtk_window_set_default_size, &
                  gtk_window_present, G_APPLICATION_DEFAULT_FLAGS, &
                  gtk_application_get_active_window, gtk_window_destroy, &
-                 gtk_window_set_child, g_signal_connect
+                 gtk_window_set_child, g_signal_connect, &
+                 gtk_box_new, gtk_box_append, GTK_ORIENTATION_VERTICAL, &
+                 GTK_ORIENTATION_HORIZONTAL, gtk_button_new_with_label, &
+                 gtk_widget_set_hexpand, gtk_widget_set_vexpand, &
+                 gtk_label_new, gtk_label_set_text, gtk_widget_set_halign, &
+                 GTK_ALIGN_START
   use g, only: g_application_run
   use treemap_widget, only: create_treemap_widget, set_scan_path
   implicit none
   private
 
-  public :: sniffly_app_run, sniffly_app_quit, sniffly_set_scan_path
+  public :: sniffly_app_run, sniffly_app_quit, sniffly_set_scan_path, &
+            sniffly_update_status
 
   ! Application constants
   character(len=*), parameter :: APP_ID = "org.fortrangoingonforty.sniffly"
@@ -23,6 +29,7 @@ module gtk_app
   ! Global application pointer (will be set in activate callback)
   type(c_ptr), save :: app_ptr = c_null_ptr
   type(c_ptr), save :: main_window_ptr = c_null_ptr
+  type(c_ptr), save :: status_label_ptr = c_null_ptr
 
   ! Global scan path (can be set via command line)
   character(len=512), save :: global_scan_path = ""
@@ -74,7 +81,7 @@ contains
   ! Callback when application activates (startup)
   subroutine on_activate(app, user_data) bind(c)
     type(c_ptr), value :: app, user_data
-    type(c_ptr) :: drawing_area
+    type(c_ptr) :: drawing_area, main_box, toolbar, scan_btn, quit_btn, status_bar
     character(len=512) :: scan_path
 
     ! Create main window
@@ -100,6 +107,27 @@ contains
       print *, "Using default directory: ", trim(scan_path)
     end if
 
+    ! Create main vertical box (toolbar + treemap)
+    main_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0_c_int)
+
+    ! Create toolbar (horizontal box)
+    toolbar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5_c_int)
+
+    ! Create Scan button
+    scan_btn = gtk_button_new_with_label("Scan"//c_null_char)
+    call g_signal_connect(scan_btn, "clicked"//c_null_char, &
+                           c_funloc(on_scan_clicked), c_null_ptr)
+    call gtk_box_append(toolbar, scan_btn)
+
+    ! Create Quit button
+    quit_btn = gtk_button_new_with_label("Quit"//c_null_char)
+    call g_signal_connect(quit_btn, "clicked"//c_null_char, &
+                           c_funloc(on_quit_clicked), c_null_ptr)
+    call gtk_box_append(toolbar, quit_btn)
+
+    ! Add toolbar to main box
+    call gtk_box_append(main_box, toolbar)
+
     ! Create treemap drawing area widget
     drawing_area = create_treemap_widget()
 
@@ -108,14 +136,27 @@ contains
       return
     end if
 
+    ! Make drawing area expand to fill space
+    call gtk_widget_set_hexpand(drawing_area, 1_c_int)
+    call gtk_widget_set_vexpand(drawing_area, 1_c_int)
+
     ! Set the scan path
     call set_scan_path(scan_path)
 
-    ! Add drawing area to window
-    call gtk_window_set_child(main_window_ptr, drawing_area)
+    ! Add drawing area to main box
+    call gtk_box_append(main_box, drawing_area)
 
-    ! TODO: Add menu bar, toolbar, status bar
-    ! For now, just show window with drawing area
+    ! Create status bar (horizontal box with label)
+    status_bar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5_c_int)
+    status_label_ptr = gtk_label_new("Ready to scan..."//c_null_char)
+    call gtk_widget_set_halign(status_label_ptr, GTK_ALIGN_START)
+    call gtk_box_append(status_bar, status_label_ptr)
+
+    ! Add status bar to main box
+    call gtk_box_append(main_box, status_bar)
+
+    ! Add main box to window
+    call gtk_window_set_child(main_window_ptr, main_box)
 
     ! Show the window
     call gtk_window_present(main_window_ptr)
@@ -123,5 +164,26 @@ contains
     print *, "Sniffly started successfully!"
     print *, "Window size: ", DEFAULT_WIDTH, "x", DEFAULT_HEIGHT
   end subroutine on_activate
+
+  ! Callback when Scan button is clicked
+  subroutine on_scan_clicked(button, user_data) bind(c)
+    type(c_ptr), value :: button, user_data
+    print *, "Scan button clicked! (Directory chooser coming soon...)"
+  end subroutine on_scan_clicked
+
+  ! Callback when Quit button is clicked
+  subroutine on_quit_clicked(button, user_data) bind(c)
+    type(c_ptr), value :: button, user_data
+    print *, "Quit button clicked"
+    call sniffly_app_quit()
+  end subroutine on_quit_clicked
+
+  ! Update status bar with scan information
+  subroutine sniffly_update_status(message)
+    character(len=*), intent(in) :: message
+    if (c_associated(status_label_ptr)) then
+      call gtk_label_set_text(status_label_ptr, trim(message)//c_null_char)
+    end if
+  end subroutine sniffly_update_status
 
 end module gtk_app
