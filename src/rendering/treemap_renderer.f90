@@ -14,13 +14,17 @@ module treemap_renderer
   private
 
   public :: scan_and_render, init_renderer, get_root_node, scan_and_render_with_hover, &
-            scan_and_render_with_interaction, find_node_at_position
+            scan_and_render_with_interaction, find_node_at_position, navigate_into_node
 
   ! Global state
   type(file_node), save, target :: root_node
   type(file_node), pointer, save :: current_view_node => null()
   logical, save :: has_data = .false.
   character(len=512), save :: scanned_path = ""
+
+  ! Layout cache state
+  logical, save :: layout_calculated = .false.
+  integer, save :: last_width = 0, last_height = 0
 
 contains
 
@@ -99,8 +103,6 @@ contains
     character(len=*), intent(in), optional :: path
     type(rect) :: bounds
     integer :: hovered_index
-    logical, save :: layout_calculated = .false.
-    integer, save :: last_width = 0, last_height = 0
 
     ! Scan if needed (only once)
     if (.not. has_data) then
@@ -155,8 +157,6 @@ contains
     character(len=*), intent(in), optional :: path
     type(rect) :: bounds
     integer :: hovered_index
-    logical, save :: layout_calculated = .false.
-    integer, save :: last_width = 0, last_height = 0
 
     ! Scan if needed (only once)
     if (.not. has_data) then
@@ -240,6 +240,46 @@ contains
       end if
     end do
   end function find_node_at_position
+
+  ! Navigate into a directory node (zoom in)
+  subroutine navigate_into_node(index)
+    integer, intent(in) :: index
+
+    ! Validate inputs
+    if (.not. associated(current_view_node)) then
+      print *, "ERROR: No current view node!"
+      return
+    end if
+
+    if (.not. allocated(current_view_node%children)) then
+      print *, "ERROR: Current node has no children!"
+      return
+    end if
+
+    if (index < 1 .or. index > current_view_node%num_children) then
+      print *, "ERROR: Invalid child index: ", index
+      return
+    end if
+
+    ! Get the target node
+    if (.not. current_view_node%children(index)%is_directory) then
+      print *, "Cannot navigate into file (not a directory)"
+      return
+    end if
+
+    ! Navigate into the directory
+    current_view_node => current_view_node%children(index)
+
+    ! Reset layout cache to force recalculation
+    layout_calculated = .false.
+
+    if (allocated(current_view_node%name)) then
+      print *, "Navigated into: ", trim(current_view_node%name)
+      print *, "Children: ", current_view_node%num_children
+    else
+      print *, "Navigated into directory (no name)"
+    end if
+  end subroutine navigate_into_node
 
   ! Render hover highlight overlay
   subroutine render_hover_highlight(cr, node)

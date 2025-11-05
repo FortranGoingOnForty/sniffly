@@ -93,9 +93,9 @@ contains
     end if
   end subroutine on_motion
 
-  ! Click callback - handle rectangle selection
+  ! Click callback - handle rectangle selection and navigation
   subroutine on_click(gesture, n_press, x, y, user_data) bind(c)
-    use treemap_renderer, only: find_node_at_position
+    use treemap_renderer, only: find_node_at_position, navigate_into_node
     type(c_ptr), value :: gesture, user_data
     integer(c_int), value :: n_press
     real(c_double), value :: x, y
@@ -104,17 +104,25 @@ contains
     ! Find which node was clicked
     clicked_index = find_node_at_position(x, y)
 
-    ! Update selection
     if (clicked_index > 0) then
-      selected_index = clicked_index
-      print *, "Selected node index: ", selected_index
+      ! Check if this is a double-click (n_press == 2)
+      if (n_press == 2) then
+        ! Double-click: navigate into the directory
+        print *, "Double-click detected! Navigating into node: ", clicked_index
+        call navigate_into_node(clicked_index)
+        selected_index = 0  ! Clear selection after navigation
+      else
+        ! Single click: just select
+        selected_index = clicked_index
+        print *, "Selected node index: ", selected_index
+      end if
     else
       ! Click outside any node - deselect
       selected_index = 0
       print *, "Deselected"
     end if
 
-    ! Trigger redraw to show selection
+    ! Trigger redraw to show changes
     if (c_associated(widget_ptr)) then
       call gtk_widget_queue_draw(widget_ptr)
     end if

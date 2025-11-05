@@ -6,6 +6,9 @@ module squarified_layout
 
   public :: calculate_treemap
 
+  ! Size adjustment parameter (0.85 = subtle compression, 1.0 = no adjustment)
+  real(real64), parameter :: SIZE_POWER = 0.85d0
+
 contains
 
   ! Calculate treemap layout using squarified algorithm
@@ -14,6 +17,8 @@ contains
     type(rect), intent(in) :: bounds
     type(rect) :: child_container
     integer :: i, j
+    integer(int64), allocatable :: adjusted_sizes(:)
+    integer(int64) :: adjusted_total
 
     ! Set this node's bounds
     node%bounds = bounds
@@ -25,16 +30,38 @@ contains
 
     if (node%size == 0) return
 
+    ! Temporarily adjust sizes for better visibility, then restore
+    allocate(adjusted_sizes(node%num_children))
+
     ! Sort children by size (descending) for better aspect ratios
     call sort_by_size(node%children, node%num_children)
 
+    ! Temporarily replace sizes with adjusted sizes for layout
+    do i = 1, node%num_children
+      adjusted_sizes(i) = node%children(i)%size ! Save original
+      node%children(i)%size = int(real(node%children(i)%size, real64) ** SIZE_POWER, int64)
+      if (node%children(i)%size == 0) node%children(i)%size = 1
+    end do
+
+    ! Calculate adjusted total
+    adjusted_total = 0
+    do i = 1, node%num_children
+      adjusted_total = adjusted_total + node%children(i)%size
+    end do
+
     ! Layout children using squarified algorithm with RELATIVE coordinates
-    ! Children are laid out in a (0, 0, width, height) space
     child_container%x = 0
     child_container%y = 0
     child_container%width = bounds%width
     child_container%height = bounds%height
-    call squarify(node%children, node%num_children, child_container, node%size)
+    call squarify(node%children, node%num_children, child_container, adjusted_total)
+
+    ! Restore original sizes
+    do i = 1, node%num_children
+      node%children(i)%size = adjusted_sizes(i)
+    end do
+
+    deallocate(adjusted_sizes)
 
     ! Offset all children by this node's position (convert relative to absolute)
     do i = 1, node%num_children
