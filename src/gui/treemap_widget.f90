@@ -27,6 +27,8 @@ module treemap_widget
   integer(c_int), parameter :: GDK_KEY_Right = 65363_c_int       ! Right arrow
   integer(c_int), parameter :: GDK_KEY_Up = 65362_c_int          ! Up arrow
   integer(c_int), parameter :: GDK_KEY_Down = 65364_c_int        ! Down arrow
+  integer(c_int), parameter :: GDK_KEY_space = 32_c_int          ! Spacebar
+  integer(c_int), parameter :: GDK_KEY_period = 46_c_int         ! Period key
 
   ! Widget state (will expand later)
   type(c_ptr), save :: widget_ptr = c_null_ptr
@@ -128,8 +130,10 @@ contains
 
   ! Motion callback - track mouse position for hover
   subroutine on_motion(controller, x, y, user_data) bind(c)
+    use gtk, only: gtk_widget_grab_focus
     type(c_ptr), value :: controller, user_data
     real(c_double), value :: x, y
+    integer(c_int) :: focus_result
 
     ! Update mouse position
     mouse_x = x
@@ -138,8 +142,9 @@ contains
     ! Switch to mouse mode (mouse takes over from keyboard)
     keyboard_mode = .false.
 
-    ! Trigger redraw to show hover effect
+    ! Grab focus to ensure keyboard events are received
     if (c_associated(widget_ptr)) then
+      focus_result = gtk_widget_grab_focus(widget_ptr)
       call gtk_widget_queue_draw(widget_ptr)
     end if
   end subroutine on_motion
@@ -219,13 +224,15 @@ contains
   ! Keyboard callback - handle all keyboard navigation
   function on_key_press(controller, keyval, keycode, state, user_data) bind(c) result(handled)
     use treemap_renderer, only: navigate_up, navigate_into_node, get_node_count, &
-                                get_node_center_by_index, find_node_in_direction
+                                get_node_center_by_index, find_node_in_direction, &
+                                find_node_at_position
     type(c_ptr), value :: controller, user_data
     integer(c_int), value :: keyval, keycode, state
     integer(c_int) :: handled
-    integer :: node_count
+    integer :: node_count, hovered_node_index
     logical :: success
 
+    print *, "DEBUG: Key press detected! keyval=", keyval, " (Enter=", GDK_KEY_Return, ")"
     handled = 0_c_int  ! Default: not handled
 
     ! Arrow keys: Navigate through nodes using spatial navigation
@@ -286,35 +293,62 @@ contains
 
       handled = 1_c_int
 
-    ! Enter: Two-stage behavior
-    else if (keyval == GDK_KEY_Return) then
+    ! Spacebar: Select item (yellow highlight)
+    else if (keyval == GDK_KEY_space) then
+      print *, "DEBUG: Spacebar detected! keyboard_mode=", keyboard_mode, " keyboard_hover_index=", keyboard_hover_index
+
+      ! Determine which node is currently hovered (either by keyboard or mouse)
       if (keyboard_mode .and. keyboard_hover_index > 0) then
-        ! First Enter: Select the keyboard-hovered item
-        if (selected_index /= keyboard_hover_index) then
-          selected_index = keyboard_hover_index
-          print *, "Enter pressed - selected keyboard hover: ", selected_index
-        else
-          ! Second Enter: Navigate into selected item
-          print *, "Enter pressed again - navigating into: ", selected_index
-          call navigate_into_node(selected_index)
-          selected_index = 0
-          keyboard_hover_index = 0
+        hovered_node_index = keyboard_hover_index
+        print *, "DEBUG: Using keyboard hover index:", hovered_node_index
+      else
+        ! Check if mouse is hovering over a node
+        hovered_node_index = find_node_at_position(mouse_x, mouse_y)
+        print *, "DEBUG: Using mouse position, found index:", hovered_node_index, " at (", mouse_x, ",", mouse_y, ")"
+      end if
 
-          ! Call navigation callback
-          if (associated(nav_callback)) then
-            call nav_callback()
-          end if
-        end if
+      ! Select the hovered item
+      if (hovered_node_index > 0) then
+        selected_index = hovered_node_index
+        print *, "Space pressed - selected node: ", selected_index
+      else
+        print *, "DEBUG: No node to select (hovered_node_index = 0)"
+      end if
+
+      ! Trigger redraw
+      if (c_associated(widget_ptr)) then
+        call gtk_widget_queue_draw(widget_ptr)
+      end if
+
+      handled = 1_c_int
+
+    ! Enter: Navigate into hovered or selected directory
+    else if (keyval == GDK_KEY_Return) then
+      ! Determine which node to navigate into (hovered takes precedence)
+      if (keyboard_mode .and. keyboard_hover_index > 0) then
+        hovered_node_index = keyboard_hover_index
+      else
+        hovered_node_index = find_node_at_position(mouse_x, mouse_y)
+      end if
+
+      ! Use hovered if available, otherwise use selected
+      if (hovered_node_index > 0) then
+        print *, "Enter pressed - navigating into hovered node: ", hovered_node_index
+        call navigate_into_node(hovered_node_index)
       else if (selected_index > 0) then
-        ! Enter on mouse-selected item: navigate immediately
-        print *, "Enter pressed - navigating into selected: ", selected_index
+        print *, "Enter pressed - navigating into selected node: ", selected_index
         call navigate_into_node(selected_index)
-        selected_index = 0
+      else
+        print *, "Enter pressed - no node to navigate into"
+      end if
 
-        ! Call navigation callback
-        if (associated(nav_callback)) then
-          call nav_callback()
-        end if
+      ! Clear selection after navigation
+      selected_index = 0
+      keyboard_hover_index = 0
+
+      ! Call navigation callback
+      if (associated(nav_callback)) then
+        call nav_callback()
       end if
 
       ! Trigger redraw

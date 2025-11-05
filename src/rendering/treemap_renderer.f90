@@ -202,10 +202,20 @@ contains
 
     ! Render selection highlight first (under hover)
     if (selected_index > 0 .and. associated(current_view_node)) then
+      print *, "DEBUG: selected_index =", selected_index
       if (allocated(current_view_node%children)) then
         if (selected_index <= current_view_node%num_children) then
+          print *, "DEBUG: Rendering selection highlight for node:", selected_index
           call render_selection_highlight(cr, current_view_node%children(selected_index))
+        else
+          print *, "DEBUG: selected_index out of bounds:", selected_index, ">", current_view_node%num_children
         end if
+      else
+        print *, "DEBUG: current_view_node has no children"
+      end if
+    else
+      if (selected_index == 0) then
+        print *, "DEBUG: selected_index is 0 (no selection)"
       end if
     end if
 
@@ -308,9 +318,13 @@ contains
 
   ! Navigate up one level (back button / breadcrumb click)
   subroutine navigate_up(levels)
+    use disk_scanner, only: build_tree
+    use file_system, only: get_path_separator
     integer, intent(in), optional :: levels
     integer :: levels_to_go
-    integer :: i
+    integer :: i, last_sep
+    character(len=512) :: parent_path, current_root_path
+    character(len=1) :: sep
     type(file_node), pointer :: temp_node
 
     if (present(levels)) then
@@ -319,10 +333,69 @@ contains
       levels_to_go = 1
     end if
 
-    ! Can't go above root
+    ! If at root depth, re-scan parent directory
     if (path_depth <= 1) then
-      print *, "Already at root"
-      return
+      ! Get parent directory path
+      if (allocated(root_node%path)) then
+        current_root_path = trim(root_node%path)
+        sep = get_path_separator()
+
+        ! Strip trailing separator if present
+        if (len_trim(current_root_path) > 1) then
+          if (current_root_path(len_trim(current_root_path):len_trim(current_root_path)) == sep) then
+            current_root_path = current_root_path(1:len_trim(current_root_path)-1)
+          end if
+        end if
+
+        ! Find last path separator (after stripping trailing slash)
+        last_sep = 0
+        do i = len_trim(current_root_path), 1, -1
+          if (current_root_path(i:i) == sep) then
+            last_sep = i
+            exit
+          end if
+        end do
+
+        ! Can't go above filesystem root
+        if (last_sep <= 1 .and. sep == '/') then
+          print *, "Already at filesystem root: /"
+          return
+        else if (last_sep == 0) then
+          print *, "Cannot determine parent directory"
+          return
+        end if
+
+        ! Get parent path
+        if (last_sep > 1) then
+          parent_path = current_root_path(1:last_sep-1)
+        else
+          parent_path = sep  ! Root directory
+        end if
+
+        print *, "Re-scanning parent directory: ", trim(parent_path)
+
+        ! Re-scan parent directory
+        call build_tree(trim(parent_path), root_node)
+        current_view_node => root_node
+        has_data = .true.
+
+        ! Update path names
+        path_depth = 1
+        if (allocated(root_node%name)) then
+          path_names(1) = trim(root_node%path)
+        else
+          path_names(1) = trim(parent_path)
+        end if
+
+        ! Reset layout cache
+        layout_calculated = .false.
+
+        print *, "Navigated up to parent: ", trim(parent_path)
+        return
+      else
+        print *, "Cannot navigate up: root path not set"
+        return
+      end if
     end if
 
     ! Go up the specified number of levels
@@ -455,9 +528,60 @@ contains
       end if
     end do
 
-    ! If no node found in direction, wrap to closest node in any direction
+    ! If no node found in direction, wrap around to opposite edge
     if (best_index == 0 .and. current_view_node%num_children > 0) then
-      best_index = 1  ! Default to first node
+      select case (direction)
+      case (1)  ! Up - wrap to bottom (max Y)
+        best_index = 1
+        best_score = real(current_view_node%children(1)%bounds%y + &
+                          current_view_node%children(1)%bounds%height, real64)
+        do i = 2, current_view_node%num_children
+          score = real(current_view_node%children(i)%bounds%y + &
+                      current_view_node%children(i)%bounds%height, real64)
+          if (score > best_score) then
+            best_score = score
+            best_index = i
+          end if
+        end do
+
+      case (2)  ! Down - wrap to top (min Y)
+        best_index = 1
+        best_score = real(current_view_node%children(1)%bounds%y, real64)
+        do i = 2, current_view_node%num_children
+          score = real(current_view_node%children(i)%bounds%y, real64)
+          if (score < best_score) then
+            best_score = score
+            best_index = i
+          end if
+        end do
+
+      case (3)  ! Left - wrap to right (max X)
+        best_index = 1
+        best_score = real(current_view_node%children(1)%bounds%x + &
+                          current_view_node%children(1)%bounds%width, real64)
+        do i = 2, current_view_node%num_children
+          score = real(current_view_node%children(i)%bounds%x + &
+                      current_view_node%children(i)%bounds%width, real64)
+          if (score > best_score) then
+            best_score = score
+            best_index = i
+          end if
+        end do
+
+      case (4)  ! Right - wrap to left (min X)
+        best_index = 1
+        best_score = real(current_view_node%children(1)%bounds%x, real64)
+        do i = 2, current_view_node%num_children
+          score = real(current_view_node%children(i)%bounds%x, real64)
+          if (score < best_score) then
+            best_score = score
+            best_index = i
+          end if
+        end do
+
+      case default
+        best_index = 1  ! Fallback
+      end select
     end if
 
   end function find_node_in_direction
