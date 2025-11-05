@@ -16,7 +16,8 @@ module gtk_app
                  gtk_widget_set_visible, &
                  gtk_button_new, gtk_button_set_icon_name, &
                  gtk_entry_new, gtk_entry_buffer_set_text, gtk_entry_get_buffer, &
-                 gtk_editable_set_editable
+                 gtk_editable_set_editable, gtk_editable_get_text, &
+                 gtk_entry_set_placeholder_text
   use g, only: g_application_run, g_idle_add
   use treemap_widget, only: create_treemap_widget, set_scan_path, register_navigation_callback, &
                              register_key_handler, register_quit_callback, register_delete_callback, &
@@ -27,7 +28,8 @@ module gtk_app
 
   public :: sniffly_app_run, sniffly_app_quit, sniffly_set_scan_path, &
             sniffly_update_status, sniffly_update_breadcrumbs, breadcrumb_callback, &
-            sniffly_update_progress, sniffly_show_progress, sniffly_hide_progress
+            sniffly_update_progress, sniffly_show_progress, sniffly_hide_progress, &
+            sniffly_update_status_bar_stats
 
   ! Application constants
   character(len=*), parameter :: APP_ID = "org.fortrangoingonforty.sniffly"
@@ -42,6 +44,7 @@ module gtk_app
   type(c_ptr), save :: breadcrumb_label_ptr = c_null_ptr
   type(c_ptr), save :: progress_bar_ptr = c_null_ptr
   type(c_ptr), save :: path_entry_ptr = c_null_ptr
+  type(c_ptr), save :: search_entry_ptr = c_null_ptr
 
   ! Global scan path (can be set via command line)
   character(len=512), save :: global_scan_path = ""
@@ -174,11 +177,19 @@ contains
     ! Add toolbar to main box
     call gtk_box_append(main_box, toolbar)
 
-    ! Create breadcrumb bar (horizontal box with path label)
+    ! Create breadcrumb bar (horizontal box with path label and search entry)
     breadcrumb_bar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5_c_int)
     breadcrumb_label_ptr = gtk_label_new(""//c_null_char)  ! Will be set by first render
     call gtk_widget_set_halign(breadcrumb_label_ptr, GTK_ALIGN_START)
+    call gtk_widget_set_hexpand(breadcrumb_label_ptr, 1_c_int)  ! Expand to push search to right
     call gtk_box_append(breadcrumb_bar, breadcrumb_label_ptr)
+
+    ! Create search/filter entry
+    search_entry_ptr = gtk_entry_new()
+    call gtk_entry_set_placeholder_text(search_entry_ptr, "Filter by filename..."//c_null_char)
+    call g_signal_connect(search_entry_ptr, "changed"//c_null_char, &
+                          c_funloc(on_search_changed), c_null_ptr)
+    call gtk_box_append(breadcrumb_bar, search_entry_ptr)
 
     ! Add breadcrumb bar to main box
     call gtk_box_append(main_box, breadcrumb_bar)
@@ -357,6 +368,67 @@ contains
       print *, "Delete cancelled by user"
     end if
   end subroutine on_delete_clicked
+
+  ! Callback when search/filter entry text changes
+  subroutine on_search_changed(editable, user_data) bind(c)
+    use gtk, only: gtk_widget_queue_draw
+    use treemap_renderer, only: set_filter_pattern, invalidate_layout
+    type(c_ptr), value :: editable, user_data
+    type(c_ptr) :: text_ptr
+    character(len=256) :: search_text
+    integer :: i
+
+    if (.not. c_associated(search_entry_ptr)) return
+
+    ! Get the text from the search entry
+    text_ptr = gtk_editable_get_text(search_entry_ptr)
+
+    ! Convert C string to Fortran string
+    search_text = ""
+    if (c_associated(text_ptr)) then
+      call c_f_string(text_ptr, search_text)
+    end if
+
+    print *, "Search filter changed: '", trim(search_text), "'"
+
+    ! Update filter in renderer
+    call set_filter_pattern(trim(search_text))
+
+    ! Invalidate layout to force recalculation (filtering happens during layout)
+    call invalidate_layout()
+
+    ! Trigger redraw
+    if (c_associated(main_window_ptr)) then
+      call gtk_widget_queue_draw(main_window_ptr)
+    end if
+  end subroutine on_search_changed
+
+  ! Helper to convert C string to Fortran string
+  subroutine c_f_string(c_str_ptr, f_str)
+    type(c_ptr), intent(in) :: c_str_ptr
+    character(len=*), intent(out) :: f_str
+    character(len=1, kind=c_char), pointer :: c_chars(:)
+    integer :: i, str_len
+
+    f_str = ""
+    if (.not. c_associated(c_str_ptr)) return
+
+    ! Get string length
+    str_len = 0
+    do i = 1, len(f_str)
+      call c_f_pointer(c_str_ptr, c_chars, [i])
+      if (c_chars(i) == c_null_char) exit
+      str_len = i
+    end do
+
+    ! Copy characters
+    if (str_len > 0) then
+      call c_f_pointer(c_str_ptr, c_chars, [str_len])
+      do i = 1, str_len
+        f_str(i:i) = c_chars(i)
+      end do
+    end if
+  end subroutine c_f_string
 
   ! Detect if we're running on macOS
   function is_macos() result(is_mac)
@@ -550,6 +622,76 @@ contains
     end if
   end subroutine sniffly_update_status
 
+  ! Update status bar with file count and size statistics
+  subroutine sniffly_update_status_bar_stats()
+    use types, only: file_node
+    use treemap_renderer, only: get_current_view_node, get_node_count
+    use iso_fortran_env, only: int64
+    type(file_node), pointer :: current_view
+    integer :: item_count, total_files
+    integer(int64) :: total_size
+    character(len=256) :: status_text
+    character(len=64) :: size_str
+    real :: size_kb, size_mb, size_gb
+
+    if (.not. c_associated(status_label_ptr)) return
+
+    ! Get current view node
+    current_view => get_current_view_node()
+    if (.not. associated(current_view)) then
+      call gtk_label_set_text(status_label_ptr, "No data"//c_null_char)
+      return
+    end if
+
+    ! Get statistics from current view
+    item_count = get_node_count()
+    total_size = current_view%size
+
+    ! Count total files recursively
+    total_files = count_files_recursive(current_view)
+
+    ! Format size nicely
+    if (total_size < 1024_int64) then
+      write(size_str, '(I0,A)') total_size, ' B'
+    else if (total_size < 1024_int64**2) then
+      size_kb = real(total_size) / 1024.0
+      write(size_str, '(F0.2,A)') size_kb, ' KB'
+    else if (total_size < 1024_int64**3) then
+      size_mb = real(total_size) / (1024.0**2)
+      write(size_str, '(F0.2,A)') size_mb, ' MB'
+    else
+      size_gb = real(total_size) / (1024.0**3)
+      write(size_str, '(F0.2,A)') size_gb, ' GB'
+    end if
+
+    ! Build status text
+    write(status_text, '(I0,A,I0,A,A)') item_count, ' items (', total_files, ' files) - ', trim(size_str)
+
+    ! Update status label
+    call gtk_label_set_text(status_label_ptr, trim(status_text)//c_null_char)
+  end subroutine sniffly_update_status_bar_stats
+
+  ! Helper function to recursively count all files in a tree
+  recursive function count_files_recursive(node) result(count)
+    use types, only: file_node
+    type(file_node), intent(in) :: node
+    integer :: count, i
+
+    count = 0
+
+    if (node%is_directory) then
+      ! For directories, count all children recursively
+      if (allocated(node%children)) then
+        do i = 1, node%num_children
+          count = count + count_files_recursive(node%children(i))
+        end do
+      end if
+    else
+      ! For files, count this file
+      count = 1
+    end if
+  end function count_files_recursive
+
   ! Update breadcrumb bar with current path
   subroutine sniffly_update_breadcrumbs()
     use treemap_renderer, only: get_breadcrumb_path, get_path_depth
@@ -625,6 +767,7 @@ contains
   ! Callback wrapper for navigation events (no arguments)
   subroutine breadcrumb_callback()
     call sniffly_update_breadcrumbs()
+    call sniffly_update_status_bar_stats()
   end subroutine breadcrumb_callback
 
   ! Show progress bar (now just resets to prepare for updates)
@@ -760,6 +903,9 @@ contains
     ! Update breadcrumbs after scan
     call sniffly_update_breadcrumbs()
 
+    ! Update status bar with file statistics
+    call sniffly_update_status_bar_stats()
+
     ! Trigger redraw to show the scanned data
     if (c_associated(main_window_ptr)) then
       call gtk_widget_queue_draw(main_window_ptr)
@@ -786,6 +932,9 @@ contains
 
     ! Update breadcrumbs after scan
     call sniffly_update_breadcrumbs()
+
+    ! Update status bar with file statistics
+    call sniffly_update_status_bar_stats()
 
     ! Trigger redraw to show the scanned data
     if (c_associated(main_window_ptr)) then

@@ -18,7 +18,8 @@ module treemap_renderer
             scan_and_render_with_interaction, find_node_at_position, navigate_into_node, &
             navigate_up, get_breadcrumb_path, get_path_depth, get_node_count, &
             get_node_center_by_index, find_node_in_direction, register_progress_callback, &
-            scan_directory, invalidate_layout, get_current_view_node, remove_selected_node_from_view
+            scan_directory, invalidate_layout, get_current_view_node, remove_selected_node_from_view, &
+            set_filter_pattern
 
   ! Callback interfaces for progress updates
   abstract interface
@@ -67,6 +68,9 @@ module treemap_renderer
   procedure(show_progress_callback), pointer, save :: show_progress_cb => null()
   procedure(hide_progress_callback), pointer, save :: hide_progress_cb => null()
   procedure(update_progress_callback), pointer, save :: update_progress_cb => null()
+
+  ! Filter pattern for search/filtering
+  character(len=256), save :: filter_pattern = ""
 
 contains
 
@@ -262,6 +266,9 @@ contains
       bounds%height = int(height)
 
       if (associated(current_view_node) .and. current_view_node%size > 0) then
+        ! Apply filter by temporarily setting filtered nodes' sizes to 0
+        call apply_filter_to_view(current_view_node)
+
         call calculate_treemap(current_view_node, bounds)
       end if
 
@@ -316,6 +323,9 @@ contains
       bounds%height = int(height)
 
       if (associated(current_view_node) .and. current_view_node%size > 0) then
+        ! Apply filter by temporarily setting filtered nodes' sizes to 0
+        call apply_filter_to_view(current_view_node)
+
         call calculate_treemap(current_view_node, bounds)
       end if
 
@@ -821,7 +831,95 @@ contains
     call cairo_stroke(cr)
   end subroutine render_selection_highlight
 
-  ! Assign colors based on depth, file type, and sibling index for variation
+  ! Get file extension from filename
+  function get_file_extension(filename) result(ext)
+    character(len=*), intent(in) :: filename
+    character(len=:), allocatable :: ext
+    integer :: dot_pos, i, ascii_val
+    character(len=256) :: temp_ext
+
+    ! Find last dot in filename
+    dot_pos = 0
+    do i = len_trim(filename), 1, -1
+      if (filename(i:i) == '.') then
+        dot_pos = i
+        exit
+      end if
+    end do
+
+    if (dot_pos > 0 .and. dot_pos < len_trim(filename)) then
+      temp_ext = trim(filename(dot_pos+1:))
+      ! Convert to lowercase for comparison
+      do i = 1, len_trim(temp_ext)
+        ascii_val = iachar(temp_ext(i:i))
+        if (ascii_val >= 65 .and. ascii_val <= 90) then  ! A-Z
+          temp_ext(i:i) = achar(ascii_val + 32)
+        end if
+      end do
+      ext = trim(temp_ext)
+    else
+      ext = ""
+    end if
+  end function get_file_extension
+
+  ! Get color hue based on file type
+  function get_file_type_hue(filename) result(hue)
+    use iso_fortran_env, only: real64
+    character(len=*), intent(in) :: filename
+    real(real64) :: hue
+    character(len=:), allocatable :: ext
+
+    ext = get_file_extension(filename)
+
+    ! Assign hue based on file type categories
+    ! Images: Green (120)
+    if (ext == "jpg" .or. ext == "jpeg" .or. ext == "png" .or. ext == "gif" .or. &
+        ext == "bmp" .or. ext == "svg" .or. ext == "ico" .or. ext == "webp" .or. &
+        ext == "tiff" .or. ext == "tif") then
+      hue = 120.0d0
+    ! Videos: Magenta (300)
+    else if (ext == "mp4" .or. ext == "avi" .or. ext == "mov" .or. ext == "mkv" .or. &
+             ext == "flv" .or. ext == "wmv" .or. ext == "webm" .or. ext == "m4v" .or. &
+             ext == "mpg" .or. ext == "mpeg") then
+      hue = 300.0d0
+    ! Audio: Cyan (180)
+    else if (ext == "mp3" .or. ext == "wav" .or. ext == "flac" .or. ext == "aac" .or. &
+             ext == "ogg" .or. ext == "wma" .or. ext == "m4a" .or. ext == "opus") then
+      hue = 180.0d0
+    ! Documents: Yellow (60)
+    else if (ext == "pdf" .or. ext == "doc" .or. ext == "docx" .or. ext == "txt" .or. &
+             ext == "rtf" .or. ext == "odt" .or. ext == "pages" .or. ext == "md") then
+      hue = 60.0d0
+    ! Archives: Red (0)
+    else if (ext == "zip" .or. ext == "tar" .or. ext == "gz" .or. ext == "rar" .or. &
+             ext == "7z" .or. ext == "bz2" .or. ext == "xz" .or. ext == "tgz" .or. &
+             ext == "dmg" .or. ext == "iso") then
+      hue = 0.0d0
+    ! Code: Orange (30)
+    else if (ext == "py" .or. ext == "js" .or. ext == "java" .or. ext == "c" .or. &
+             ext == "cpp" .or. ext == "h" .or. ext == "rs" .or. ext == "go" .or. &
+             ext == "rb" .or. ext == "php" .or. ext == "f90" .or. ext == "f95" .or. &
+             ext == "f03" .or. ext == "f08" .or. ext == "ts" .or. ext == "jsx" .or. &
+             ext == "tsx" .or. ext == "swift" .or. ext == "kt") then
+      hue = 30.0d0
+    ! Spreadsheets: Lime (90)
+    else if (ext == "xls" .or. ext == "xlsx" .or. ext == "csv" .or. ext == "ods" .or. &
+             ext == "numbers") then
+      hue = 90.0d0
+    ! Presentations: Rose (330)
+    else if (ext == "ppt" .or. ext == "pptx" .or. ext == "odp" .or. ext == "key") then
+      hue = 330.0d0
+    ! Executables: Dark Red (15)
+    else if (ext == "exe" .or. ext == "app" .or. ext == "bin" .or. ext == "sh" .or. &
+             ext == "bat" .or. ext == "com") then
+      hue = 15.0d0
+    ! Default: Gray tone (0 with low saturation handled by caller)
+    else
+      hue = 0.0d0
+    end if
+  end function get_file_type_hue
+
+  ! Assign colors based on file type
   recursive subroutine color_tree(node, depth)
     use iso_fortran_env, only: real64
     type(file_node), intent(inout) :: node
@@ -829,28 +927,39 @@ contains
     integer :: i
     real(real64) :: hue, hue_offset
 
-    ! Color based on depth (alternating hues)
-    hue = mod(depth * 60.0, 360.0)  ! 0, 60, 120, 180, 240, 300
-
     if (node%is_directory) then
-      ! Directories: blue-ish tones
+      ! Directories: blue-ish tones with depth variation
+      hue = mod(depth * 60.0, 360.0)  ! 0, 60, 120, 180, 240, 300
       node%color = hsv_to_rgb(hue, 0.6d0, 0.8d0)
     else
-      ! Files: warmer tones
-      node%color = hsv_to_rgb(hue + 30.0, 0.5d0, 0.9d0)
+      ! Files: color by file type
+      hue = get_file_type_hue(node%name)
+      if (hue == 0.0d0 .and. len_trim(get_file_extension(node%name)) == 0) then
+        ! No extension - use gray
+        node%color = hsv_to_rgb(0.0d0, 0.1d0, 0.8d0)
+      else
+        node%color = hsv_to_rgb(hue, 0.7d0, 0.9d0)
+      end if
     end if
 
     ! Recurse to children with varying hues for siblings
     if (allocated(node%children)) then
       do i = 1, node%num_children
-        ! Calculate hue offset based on sibling index (spread across 360 degrees)
-        hue_offset = real(mod(i * 37, 360), real64)  ! 37 is prime for good distribution
-
-        ! Apply variation to child
+        ! For directories, calculate hue offset based on sibling index
         if (node%children(i)%is_directory) then
+          hue = mod(depth * 60.0, 360.0)
+          hue_offset = real(mod(i * 37, 360), real64)  ! 37 is prime for good distribution
           node%children(i)%color = hsv_to_rgb(hue + hue_offset, 0.6d0, 0.8d0)
         else
-          node%children(i)%color = hsv_to_rgb(hue + hue_offset + 30.0, 0.5d0, 0.9d0)
+          ! For files, use file type color
+          hue = get_file_type_hue(node%children(i)%name)
+          if (hue == 0.0d0 .and. len_trim(get_file_extension(node%children(i)%name)) == 0) then
+            node%children(i)%color = hsv_to_rgb(0.0d0, 0.1d0, 0.8d0)
+          else
+            ! Add slight variation based on sibling index
+            hue_offset = real(mod(i * 5, 30), real64) - 15.0d0  ! Vary by ±15 degrees
+            node%children(i)%color = hsv_to_rgb(hue + hue_offset, 0.7d0, 0.9d0)
+          end if
         end if
 
         ! Recurse with increased depth
@@ -904,6 +1013,12 @@ contains
     if (allocated(view_node%children) .and. view_node%num_children > 0) then
       print *, "DEBUG: Rendering", view_node%num_children, "children"
       do i = 1, view_node%num_children
+        ! Skip nodes that don't match the filter
+        if (.not. matches_filter(view_node%children(i)%name)) then
+          print *, "DEBUG: Skipping filtered child", i, ":", trim(view_node%children(i)%name)
+          cycle
+        end if
+
         print *, "DEBUG: Rendering child", i, "bounds:", &
                  view_node%children(i)%bounds%x, view_node%children(i)%bounds%y, &
                  view_node%children(i)%bounds%width, view_node%children(i)%bounds%height
@@ -1131,5 +1246,86 @@ contains
       call cairo_show_text(cr, trim(size_text)//c_null_char)
     end if
   end subroutine render_label
+
+  ! Set the filter pattern for filename filtering
+  subroutine set_filter_pattern(pattern)
+    character(len=*), intent(in) :: pattern
+
+    filter_pattern = trim(pattern)
+    print *, "Filter pattern set to: '", trim(filter_pattern), "'"
+
+    ! Invalidate layout when filter changes
+    layout_calculated = .false.
+  end subroutine set_filter_pattern
+
+  ! Check if a filename matches the current filter pattern (case-insensitive substring match)
+  function matches_filter(filename) result(matches)
+    character(len=*), intent(in) :: filename
+    logical :: matches
+    character(len=256) :: lower_name, lower_pattern
+    integer :: i, ascii_val
+
+    ! If no filter is set, everything matches
+    if (len_trim(filter_pattern) == 0) then
+      matches = .true.
+      return
+    end if
+
+    ! Convert both to lowercase for case-insensitive comparison
+    lower_name = ""
+    lower_pattern = ""
+
+    do i = 1, min(len_trim(filename), 256)
+      ascii_val = iachar(filename(i:i))
+      if (ascii_val >= 65 .and. ascii_val <= 90) then  ! A-Z
+        lower_name(i:i) = achar(ascii_val + 32)
+      else
+        lower_name(i:i) = filename(i:i)
+      end if
+    end do
+
+    do i = 1, min(len_trim(filter_pattern), 256)
+      ascii_val = iachar(filter_pattern(i:i))
+      if (ascii_val >= 65 .and. ascii_val <= 90) then  ! A-Z
+        lower_pattern(i:i) = achar(ascii_val + 32)
+      else
+        lower_pattern(i:i) = filter_pattern(i:i)
+      end if
+    end do
+
+    ! Check if pattern is a substring of filename
+    matches = index(trim(lower_name), trim(lower_pattern)) > 0
+  end function matches_filter
+
+  ! Apply filter to view by creating a filtered children array
+  ! This modifies the node's children array to only include matching items
+  subroutine apply_filter_to_view(node)
+    type(file_node), intent(inout) :: node
+    integer :: i, filtered_count
+    type(file_node), dimension(:), allocatable :: filtered_children
+    integer(int64) :: original_sizes(10000)  ! Store original sizes
+    integer :: match_count
+
+    ! If no filter is set, nothing to do
+    if (len_trim(filter_pattern) == 0) return
+
+    ! If node has no children, nothing to do
+    if (.not. allocated(node%children)) return
+    if (node%num_children == 0) return
+
+    ! Count matching children and store original sizes
+    match_count = 0
+    do i = 1, node%num_children
+      original_sizes(i) = node%children(i)%size
+      if (matches_filter(node%children(i)%name)) then
+        match_count = match_count + 1
+      else
+        ! Set size to 0 for filtered nodes so layout skips them
+        node%children(i)%size = 0_int64
+      end if
+    end do
+
+    print *, "Filter applied:", match_count, "of", node%num_children, "items match"
+  end subroutine apply_filter_to_view
 
 end module treemap_renderer

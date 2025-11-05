@@ -6,7 +6,8 @@ module treemap_widget
                  gtk_widget_set_size_request, gtk_event_controller_motion_new, &
                  gtk_widget_add_controller, g_signal_connect, &
                  gtk_gesture_click_new, gtk_widget_queue_draw, &
-                 gtk_event_controller_key_new, gtk_widget_set_focusable
+                 gtk_event_controller_key_new, gtk_widget_set_focusable, &
+                 gtk_widget_set_has_tooltip, gtk_tooltip_set_text
   use treemap_renderer, only: scan_and_render, init_renderer, scan_and_render_with_hover, &
                               get_current_view_node
   implicit none
@@ -97,6 +98,11 @@ contains
 
     ! Make widget focusable to receive keyboard events
     call gtk_widget_set_focusable(widget, 1_c_int)
+
+    ! Enable tooltips
+    call gtk_widget_set_has_tooltip(widget, 1_c_int)
+    call g_signal_connect(widget, "query-tooltip"//c_null_char, &
+                           c_funloc(on_query_tooltip), c_null_ptr)
 
     ! Set draw function (called when widget needs to redraw)
     call gtk_drawing_area_set_draw_func(widget, &
@@ -429,6 +435,69 @@ contains
     end if
 
   end function on_key_press
+
+  ! Tooltip query callback - show file info on hover
+  function on_query_tooltip(widget, x, y, keyboard_mode, tooltip, user_data) bind(c) result(show_tooltip)
+    use types, only: file_node
+    use treemap_renderer, only: find_node_at_position
+    use iso_fortran_env, only: int64
+    type(c_ptr), value :: widget, tooltip, user_data
+    integer(c_int), value :: x, y, keyboard_mode
+    integer(c_int) :: show_tooltip
+    type(file_node), pointer :: current_view
+    integer :: hovered_index
+    character(len=512) :: tooltip_text
+    character(len=64) :: size_str
+    real(c_double) :: dx, dy
+    real :: size_mb, size_gb
+
+    show_tooltip = 0_c_int  ! Default: don't show tooltip
+
+    ! Convert coordinates to double for find_node_at_position
+    dx = real(x, c_double)
+    dy = real(y, c_double)
+
+    ! Find which node is at this position
+    hovered_index = find_node_at_position(dx, dy)
+
+    if (hovered_index > 0) then
+      ! Get current view node from renderer
+      current_view => get_current_view_node()
+      if (.not. associated(current_view)) return
+      if (.not. allocated(current_view%children)) return
+      if (hovered_index > current_view%num_children) return
+
+      ! Format the size nicely
+      if (current_view%children(hovered_index)%size < 1024_int64) then
+        write(size_str, '(I0,A)') current_view%children(hovered_index)%size, ' B'
+      else if (current_view%children(hovered_index)%size < 1024_int64**2) then
+        write(size_str, '(F0.2,A)') real(current_view%children(hovered_index)%size)/1024.0, ' KB'
+      else if (current_view%children(hovered_index)%size < 1024_int64**3) then
+        size_mb = real(current_view%children(hovered_index)%size)/(1024.0**2)
+        write(size_str, '(F0.2,A)') size_mb, ' MB'
+      else
+        size_gb = real(current_view%children(hovered_index)%size)/(1024.0**3)
+        write(size_str, '(F0.2,A)') size_gb, ' GB'
+      end if
+
+      ! Build tooltip text
+      if (current_view%children(hovered_index)%is_directory) then
+        write(tooltip_text, '(A,A,A,A,A,I0,A)') &
+          trim(current_view%children(hovered_index)%name), &
+          char(10), 'Size: ', trim(size_str), &
+          char(10), current_view%children(hovered_index)%num_children, ' items'
+      else
+        write(tooltip_text, '(A,A,A,A)') &
+          trim(current_view%children(hovered_index)%name), &
+          char(10), 'Size: ', trim(size_str)
+      end if
+
+      ! Set the tooltip text
+      call gtk_tooltip_set_text(tooltip, trim(tooltip_text)//c_null_char)
+      show_tooltip = 1_c_int  ! Show tooltip
+    end if
+
+  end function on_query_tooltip
 
   ! Check if there is a selection
   function has_selection() result(is_selected)
