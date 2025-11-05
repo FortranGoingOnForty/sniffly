@@ -21,7 +21,8 @@ contains
     type(file_node), intent(inout) :: node
     type(rect), intent(in) :: bounds
     integer, intent(in) :: depth
-    integer :: i
+    integer :: i, visible_count
+    real(real64) :: size_threshold
 
     ! Set this node's bounds
     node%bounds = bounds
@@ -36,11 +37,24 @@ contains
     ! Sort children by size (descending) for spiral effect
     call sort_by_size(node%children, node%num_children)
 
-    ! Layout children using alternating slice-and-dice
-    call slice_and_dice(node%children, node%num_children, bounds, node%size, depth)
+    ! Group very small files to prevent visual clutter
+    ! Only show files that are at least 0.5% of parent, or top 50 items
+    size_threshold = real(node%size, real64) * 0.005_real64
+    visible_count = node%num_children
 
-    ! Recursively layout each child's children
+    ! Find cutoff point: files must be >= 0.5% of total OR in top 50
     do i = 1, node%num_children
+      if (i > 50 .and. real(node%children(i)%size, real64) < size_threshold) then
+        visible_count = i - 1
+        exit
+      end if
+    end do
+
+    ! Layout only visible children
+    call slice_and_dice(node%children, visible_count, bounds, node%size, depth)
+
+    ! Recursively layout each visible child's children
+    do i = 1, visible_count
       if (allocated(node%children(i)%children)) then
         ! Pass child's bounds and increment depth for alternating direction
         call calculate_treemap_internal(node%children(i), node%children(i)%bounds, depth + 1)
@@ -48,19 +62,18 @@ contains
     end do
   end subroutine calculate_treemap_internal
 
-  ! Recursive spiral layout - creates fibonacci-like spiral pattern
-  ! Takes largest items and gives them dominant space, recursively subdivides remainder
+  ! True conch shell spiral with fixed clockwise rotation
+  ! TOP → RIGHT → BOTTOM → LEFT, converging on bottom-right interior
   recursive subroutine slice_and_dice(nodes, num_nodes, bounds, total_size, depth)
     type(file_node), dimension(:), intent(inout) :: nodes
     integer, intent(in) :: num_nodes
     type(rect), intent(in) :: bounds
     integer(int64), intent(in) :: total_size
     integer, intent(in) :: depth
-    integer :: pivot_count, i
+    integer :: pivot_count, i, spiral_direction
     integer(int64) :: pivot_size, remaining_size
     type(rect) :: pivot_area, remaining_area
     real(real64) :: size_ratio
-    logical :: split_horizontal
 
     if (num_nodes == 0 .or. total_size == 0) return
     if (bounds%width <= 0 .or. bounds%height <= 0) return
@@ -77,11 +90,10 @@ contains
       return
     end if
 
-    ! Determine split direction based on aspect ratio (prefer squarish splits)
-    split_horizontal = bounds%width >= bounds%height
+    ! Fixed spiral rotation: 0=TOP, 1=RIGHT, 2=BOTTOM, 3=LEFT
+    spiral_direction = mod(depth, 4)
 
     ! Take largest item (or small group) as pivot
-    ! Determine how many items to take based on size distribution
     pivot_count = 1
     pivot_size = nodes(1)%size
 
@@ -89,7 +101,6 @@ contains
     do i = 2, min(3, num_nodes)
       size_ratio = real(nodes(i)%size, real64) / real(nodes(1)%size, real64)
       if (size_ratio > 0.6_real64) then
-        ! Similar size, include in pivot group
         pivot_count = i
         pivot_size = pivot_size + nodes(i)%size
       else
@@ -100,48 +111,77 @@ contains
     ! Limit pivot group size
     pivot_count = min(pivot_count, max(1, num_nodes / 3))
 
-    ! Calculate remaining size
     remaining_size = total_size - pivot_size
 
     if (pivot_count >= num_nodes) then
-      ! All items in pivot, just lay them out
-      call simple_stack(nodes, num_nodes, bounds, total_size, split_horizontal)
+      call simple_stack(nodes, num_nodes, bounds, total_size, bounds%width >= bounds%height)
       return
     end if
 
-    ! Calculate pivot area size (proportional to total size)
-    if (split_horizontal) then
-      ! Split left-right: pivot gets left portion
-      pivot_area%x = bounds%x
-      pivot_area%y = bounds%y
-      pivot_area%width = int((real(pivot_size, real64) / real(total_size, real64)) * real(bounds%width, real64))
-      pivot_area%width = max(30, min(pivot_area%width, bounds%width - 30))  ! Ensure minimum remaining
-      pivot_area%height = bounds%height
-
-      ! Remaining area is on the right
-      remaining_area%x = bounds%x + pivot_area%width
-      remaining_area%y = bounds%y
-      remaining_area%width = bounds%width - pivot_area%width
-      remaining_area%height = bounds%height
-    else
-      ! Split top-bottom: pivot gets top portion
+    ! Calculate pivot placement based on fixed spiral direction
+    if (spiral_direction == 0) then
+      ! TOP: Pivot at top, remaining below
       pivot_area%x = bounds%x
       pivot_area%y = bounds%y
       pivot_area%width = bounds%width
       pivot_area%height = int((real(pivot_size, real64) / real(total_size, real64)) * real(bounds%height, real64))
-      pivot_area%height = max(30, min(pivot_area%height, bounds%height - 30))  ! Ensure minimum remaining
+      pivot_area%height = max(30, min(pivot_area%height, bounds%height - 30))
 
-      ! Remaining area is on the bottom
       remaining_area%x = bounds%x
       remaining_area%y = bounds%y + pivot_area%height
       remaining_area%width = bounds%width
       remaining_area%height = bounds%height - pivot_area%height
+
+    else if (spiral_direction == 1) then
+      ! RIGHT: Pivot on right, remaining on left
+      pivot_area%width = int((real(pivot_size, real64) / real(total_size, real64)) * real(bounds%width, real64))
+      pivot_area%width = max(30, min(pivot_area%width, bounds%width - 30))
+      pivot_area%x = bounds%x + bounds%width - pivot_area%width
+      pivot_area%y = bounds%y
+      pivot_area%height = bounds%height
+
+      remaining_area%x = bounds%x
+      remaining_area%y = bounds%y
+      remaining_area%width = bounds%width - pivot_area%width
+      remaining_area%height = bounds%height
+
+    else if (spiral_direction == 2) then
+      ! BOTTOM: Pivot at bottom, remaining above
+      pivot_area%height = int((real(pivot_size, real64) / real(total_size, real64)) * real(bounds%height, real64))
+      pivot_area%height = max(30, min(pivot_area%height, bounds%height - 30))
+      pivot_area%x = bounds%x
+      pivot_area%y = bounds%y + bounds%height - pivot_area%height
+      pivot_area%width = bounds%width
+
+      remaining_area%x = bounds%x
+      remaining_area%y = bounds%y
+      remaining_area%width = bounds%width
+      remaining_area%height = bounds%height - pivot_area%height
+
+    else  ! spiral_direction == 3
+      ! LEFT: Pivot on left, remaining on right
+      pivot_area%x = bounds%x
+      pivot_area%y = bounds%y
+      pivot_area%width = int((real(pivot_size, real64) / real(total_size, real64)) * real(bounds%width, real64))
+      pivot_area%width = max(30, min(pivot_area%width, bounds%width - 30))
+      pivot_area%height = bounds%height
+
+      remaining_area%x = bounds%x + pivot_area%width
+      remaining_area%y = bounds%y
+      remaining_area%width = bounds%width - pivot_area%width
+      remaining_area%height = bounds%height
     end if
 
     ! Layout pivot items in their area
-    call simple_stack(nodes(1:pivot_count), pivot_count, pivot_area, pivot_size, .not. split_horizontal)
+    if (spiral_direction == 0 .or. spiral_direction == 2) then
+      ! Top or bottom: stack horizontally
+      call simple_stack(nodes(1:pivot_count), pivot_count, pivot_area, pivot_size, .true.)
+    else
+      ! Right or left: stack vertically
+      call simple_stack(nodes(1:pivot_count), pivot_count, pivot_area, pivot_size, .false.)
+    end if
 
-    ! Recursively layout remaining items (alternates split direction naturally)
+    ! Recursively layout remaining items (continues spiral clockwise)
     if (num_nodes > pivot_count) then
       call slice_and_dice(nodes(pivot_count+1:num_nodes), num_nodes - pivot_count, &
                          remaining_area, remaining_size, depth + 1)
