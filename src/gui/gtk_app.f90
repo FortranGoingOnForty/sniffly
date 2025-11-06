@@ -110,7 +110,7 @@ contains
   ! Callback when application activates (startup)
   subroutine on_activate(app, user_data) bind(c)
     type(c_ptr), value :: app, user_data
-    type(c_ptr) :: drawing_area, main_box, toolbar, open_dir_btn, scan_btn, back_btn, forward_btn, up_btn, open_finder_btn, copy_path_btn, info_btn, refresh_btn, delete_btn, status_bar, breadcrumb_bar
+    type(c_ptr) :: drawing_area, main_box, toolbar, open_dir_btn, scan_btn, back_btn, forward_btn, up_btn, open_finder_btn, copy_path_btn, info_btn, delete_btn, status_bar, breadcrumb_bar
     character(len=512) :: scan_path
     integer(c_int) :: idle_id
 
@@ -218,14 +218,7 @@ contains
                            c_funloc(on_info_clicked), c_null_ptr)
     call gtk_box_append(toolbar, info_btn)
 
-    ! Create Refresh/Force Rescan button with circular arrow icon
-    refresh_btn = gtk_button_new()
-    call gtk_button_set_icon_name(refresh_btn, "view-refresh-symbolic"//c_null_char)
-    call g_signal_connect(refresh_btn, "clicked"//c_null_char, &
-                           c_funloc(on_refresh_clicked), c_null_ptr)
-    call gtk_box_append(toolbar, refresh_btn)
-
-    ! Create Delete button (floated right after Refresh)
+    ! Create Delete button
     delete_btn = gtk_button_new()
     call gtk_button_set_icon_name(delete_btn, "user-trash"//c_null_char)
     call g_signal_connect(delete_btn, "clicked"//c_null_char, &
@@ -344,18 +337,21 @@ contains
 
   ! Callback when Scan button is clicked
   subroutine on_scan_clicked(button, user_data) bind(c)
+    use treemap_renderer, only: clear_cache, invalidate_layout
     type(c_ptr), value :: button, user_data
-    print *, "Scan button clicked! Rescanning current path..."
-    print *, "DEBUG: global_scan_path = '", trim(global_scan_path), "'"
-    print *, "DEBUG: len_trim(global_scan_path) = ", len_trim(global_scan_path)
 
-    ! Trigger rescan of current path
-    if (len_trim(global_scan_path) > 0) then
-      print *, "DEBUG: Calling trigger_rescan with path: ", trim(global_scan_path)
-      call trigger_rescan(global_scan_path)
-    else
-      print *, "WARNING: No scan path set, cannot rescan"
+    if (len_trim(global_scan_path) == 0) then
+      call sniffly_update_status("No directory to scan")
+      return
     end if
+
+    ! Clear the directory cache to force a fresh scan
+    call clear_cache()
+    call invalidate_layout()
+
+    ! Trigger a rescan of the current path
+    call sniffly_update_status("Clearing cache and rescanning...")
+    call trigger_rescan(global_scan_path)
   end subroutine on_scan_clicked
 
   ! Callback when Open in Finder button is clicked
@@ -494,25 +490,6 @@ contains
     info_msg = trim(info_text)
     call sniffly_update_status(info_msg)
   end subroutine on_info_clicked
-
-  ! Callback when Refresh/Force Rescan button is clicked
-  subroutine on_refresh_clicked(button, user_data) bind(c)
-    use treemap_renderer, only: clear_cache, invalidate_layout
-    type(c_ptr), value :: button, user_data
-
-    if (len_trim(global_scan_path) == 0) then
-      call sniffly_update_status("No directory to rescan")
-      return
-    end if
-
-    ! Clear the directory cache to force a fresh scan
-    call clear_cache()
-    call invalidate_layout()
-
-    ! Trigger a rescan of the current path
-    call sniffly_update_status("Clearing cache and rescanning...")
-    call trigger_rescan(global_scan_path)
-  end subroutine on_refresh_clicked
 
   ! Helper: Update Back/Forward button states
   subroutine update_history_buttons()
