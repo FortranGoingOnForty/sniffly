@@ -116,6 +116,7 @@ contains
     new_children(large_idx)%is_directory = .true.
     new_children(large_idx)%access_denied = .false.
     new_children(large_idx)%size = small_total
+    new_children(large_idx)%original_size = small_total  ! Initialize backup size
     new_children(large_idx)%num_children = small_count
 
     ! Format name with count
@@ -153,6 +154,7 @@ contains
 
     ! Copy simple components
     to%size = from%size
+    to%original_size = from%original_size
     to%is_directory = from%is_directory
     to%access_denied = from%access_denied
     to%num_children = from%num_children
@@ -216,6 +218,7 @@ contains
     if (is_symlink(path)) then
       node%is_directory = .false.
       node%size = 0_int64
+      node%original_size = 0_int64
       return
     end if
 
@@ -226,6 +229,7 @@ contains
       if (depth >= MAX_DEPTH) then
         node%access_denied = .true.
         node%size = 0_int64
+        node%original_size = 0_int64
         return
       end if
 
@@ -276,11 +280,16 @@ contains
       ! Group small files into synthetic node if applicable
       call group_small_files(node)
 
+      ! Initialize original_size backup (for filter restoration)
+      node%original_size = node%size
+
       ! Deallocate entries array
       if (allocated(entries)) deallocate(entries)
     else
       ! File - get size directly
       node%size = get_file_size(path)
+      ! Initialize original_size backup (for filter restoration)
+      node%original_size = node%size
     end if
   end subroutine scan_directory
 

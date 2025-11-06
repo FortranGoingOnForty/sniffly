@@ -428,6 +428,10 @@ contains
       return
     end if
 
+    ! Restore all sizes before navigating (in case they were modified by filtering/deletion)
+    print *, "Restoring sizes before navigation..."
+    call recalculate_sizes(root_node)
+
     ! Navigate into the directory
     current_view_node => current_view_node%children(index)
 
@@ -538,6 +542,10 @@ contains
 
     ! Go up the specified number of levels
     path_depth = max(1, path_depth - levels_to_go)
+
+    ! Restore all sizes before navigating (in case they were modified by filtering/deletion)
+    print *, "Restoring sizes before navigation..."
+    call recalculate_sizes(root_node)
 
     ! Navigate back up to the correct node by traversing from root
     current_view_node => root_node
@@ -1006,22 +1014,44 @@ contains
     type(c_ptr), intent(in) :: cr
     type(file_node), intent(in) :: view_node
     type(rect), intent(in) :: bounds
-    integer :: i
+    integer :: i, visible_count
     real(c_double) :: center_x, center_y
 
     ! Render only the direct children of the current view
     if (allocated(view_node%children) .and. view_node%num_children > 0) then
       print *, "DEBUG: Rendering", view_node%num_children, "children"
+      print *, "DEBUG: Current filter pattern: '", trim(filter_pattern), "'"
+
+      ! Count visible nodes
+      visible_count = 0
       do i = 1, view_node%num_children
+        ! Skip nodes without names (shouldn't happen but be defensive)
+        if (.not. allocated(view_node%children(i)%name)) cycle
+
+        if (view_node%children(i)%size > 0 .and. matches_filter(view_node%children(i)%name)) then
+          visible_count = visible_count + 1
+          if (visible_count <= 5) then
+            print *, "DEBUG: Visible child", i, ":", trim(view_node%children(i)%name), &
+                     "size=", view_node%children(i)%size, "original=", view_node%children(i)%original_size
+          end if
+        end if
+      end do
+      print *, "DEBUG: Total visible children:", visible_count, "of", view_node%num_children
+
+      do i = 1, view_node%num_children
+        ! Skip nodes without names (shouldn't happen but be defensive)
+        if (.not. allocated(view_node%children(i)%name)) cycle
+
         ! Skip nodes that don't match the filter
         if (.not. matches_filter(view_node%children(i)%name)) then
-          print *, "DEBUG: Skipping filtered child", i, ":", trim(view_node%children(i)%name)
           cycle
         end if
 
-        print *, "DEBUG: Rendering child", i, "bounds:", &
-                 view_node%children(i)%bounds%x, view_node%children(i)%bounds%y, &
-                 view_node%children(i)%bounds%width, view_node%children(i)%bounds%height
+        ! Skip nodes with size 0 (filtered out or deleted)
+        if (view_node%children(i)%size == 0) then
+          cycle
+        end if
+
         call render_node(cr, view_node%children(i))
       end do
     else
@@ -1254,6 +1284,12 @@ contains
     filter_pattern = trim(pattern)
     print *, "Filter pattern set to: '", trim(filter_pattern), "'"
 
+    ! If filter is being cleared, restore all sizes
+    if (len_trim(filter_pattern) == 0 .and. associated(current_view_node)) then
+      print *, "Filter cleared - restoring all sizes"
+      call recalculate_sizes(root_node)
+    end if
+
     ! Invalidate layout when filter changes
     layout_calculated = .false.
   end subroutine set_filter_pattern
@@ -1268,6 +1304,12 @@ contains
     ! If no filter is set, everything matches
     if (len_trim(filter_pattern) == 0) then
       matches = .true.
+      return
+    end if
+
+    ! If filename is empty, don't match (defensive check)
+    if (len_trim(filename) == 0) then
+      matches = .false.
       return
     end if
 
@@ -1297,13 +1339,41 @@ contains
     matches = index(trim(lower_name), trim(lower_pattern)) > 0
   end function matches_filter
 
-  ! Apply filter to view by creating a filtered children array
-  ! This modifies the node's children array to only include matching items
+  ! Recursively recalculate directory sizes from their children
+  ! This restores sizes that may have been set to 0 by filtering
+  recursive subroutine recalculate_sizes(node)
+    type(file_node), intent(inout) :: node
+    integer :: i
+
+    ! If this is a file, restore from original_size backup
+    ! (original_size is always set during scanning, even for empty files)
+    if (.not. node%is_directory) then
+      node%size = node%original_size
+      return
+    end if
+
+    ! Directories: recalculate from children
+    if (allocated(node%children) .and. node%num_children > 0) then
+      ! First recalculate all children recursively
+      do i = 1, node%num_children
+        call recalculate_sizes(node%children(i))
+      end do
+
+      ! Then sum up children sizes
+      node%size = 0_int64
+      do i = 1, node%num_children
+        node%size = node%size + node%children(i)%size
+      end do
+    else
+      ! Empty directory
+      node%size = 0_int64
+    end if
+  end subroutine recalculate_sizes
+
+  ! Apply filter to view by setting non-matching nodes' sizes to 0
   subroutine apply_filter_to_view(node)
     type(file_node), intent(inout) :: node
-    integer :: i, filtered_count
-    type(file_node), dimension(:), allocatable :: filtered_children
-    integer(int64) :: original_sizes(10000)  ! Store original sizes
+    integer :: i
     integer :: match_count
 
     ! If no filter is set, nothing to do
@@ -1313,10 +1383,13 @@ contains
     if (.not. allocated(node%children)) return
     if (node%num_children == 0) return
 
-    ! Count matching children and store original sizes
+    ! First, recalculate all sizes from scratch (restores any previously filtered sizes)
+    call recalculate_sizes(node)
+
+    ! Now apply filter by setting non-matching children to size 0
+    ! Note: original_size is already backed up during scanning, so no need to back up here
     match_count = 0
     do i = 1, node%num_children
-      original_sizes(i) = node%children(i)%size
       if (matches_filter(node%children(i)%name)) then
         match_count = match_count + 1
       else

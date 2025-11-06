@@ -33,6 +33,7 @@ module types
     character(len=:), allocatable :: name
     character(len=:), allocatable :: path
     integer(int64) :: size
+    integer(int64) :: original_size  ! Backup of size before filtering (0 = not backed up yet)
     logical :: is_directory
     logical :: access_denied  ! True if permission denied during scan
 
