@@ -6,13 +6,17 @@ module treemap_widget
                  gtk_widget_set_size_request, gtk_event_controller_motion_new, &
                  gtk_widget_add_controller, g_signal_connect, &
                  gtk_gesture_click_new, gtk_widget_queue_draw, &
-                 gtk_event_controller_key_new, gtk_widget_set_focusable
-  use treemap_renderer, only: scan_and_render, init_renderer, scan_and_render_with_hover
+                 gtk_event_controller_key_new, gtk_widget_set_focusable, &
+                 gtk_widget_set_has_tooltip, gtk_tooltip_set_text
+  use treemap_renderer, only: scan_and_render, init_renderer, scan_and_render_with_hover, &
+                              get_current_view_node
   implicit none
   private
 
   public :: create_treemap_widget, set_scan_path, get_widget_ptr, register_navigation_callback, &
-            register_key_handler, register_quit_callback, mark_initial_scan_complete
+            register_key_handler, register_quit_callback, register_delete_callback, &
+            mark_initial_scan_complete, get_selected_node_path, has_selection, get_selected_index, &
+            clear_selection
 
   ! Callback interface for navigation events
   abstract interface
@@ -26,6 +30,12 @@ module treemap_widget
     end subroutine quit_callback
   end interface
 
+  ! Callback interface for delete events
+  abstract interface
+    subroutine delete_callback()
+    end subroutine delete_callback
+  end interface
+
   ! GDK Key constants
   integer(c_int), parameter :: GDK_KEY_Return = 65293_c_int      ! Enter key
   integer(c_int), parameter :: GDK_KEY_BackSpace = 65288_c_int   ! Backspace key
@@ -36,6 +46,7 @@ module treemap_widget
   integer(c_int), parameter :: GDK_KEY_space = 32_c_int          ! Spacebar
   integer(c_int), parameter :: GDK_KEY_period = 46_c_int         ! Period key
   integer(c_int), parameter :: GDK_KEY_q = 113_c_int             ! q key
+  integer(c_int), parameter :: GDK_KEY_d = 100_c_int             ! d key
 
   ! Widget state (will expand later)
   type(c_ptr), save :: widget_ptr = c_null_ptr
@@ -61,11 +72,14 @@ module treemap_widget
   ! Quit callback (called when user wants to quit)
   procedure(quit_callback), pointer, save :: quit_cb => null()
 
+  ! Delete callback (called when user wants to delete)
+  procedure(delete_callback), pointer, save :: delete_cb => null()
+
 contains
 
   ! Create and initialize the treemap drawing area widget
   function create_treemap_widget() result(widget)
-    type(c_ptr) :: widget, motion_controller, click_controller, key_controller
+    type(c_ptr) :: widget, motion_controller, click_controller
 
     ! Initialize renderer
     call init_renderer()
@@ -84,6 +98,11 @@ contains
 
     ! Make widget focusable to receive keyboard events
     call gtk_widget_set_focusable(widget, 1_c_int)
+
+    ! Enable tooltips
+    call gtk_widget_set_has_tooltip(widget, 1_c_int)
+    call g_signal_connect(widget, "query-tooltip"//c_null_char, &
+                           c_funloc(on_query_tooltip), c_null_ptr)
 
     ! Set draw function (called when widget needs to redraw)
     call gtk_drawing_area_set_draw_func(widget, &
@@ -147,6 +166,13 @@ contains
     quit_cb => callback
     print *, "Quit callback registered"
   end subroutine register_quit_callback
+
+  ! Register a callback to be called when user wants to delete
+  subroutine register_delete_callback(callback)
+    procedure(delete_callback) :: callback
+    delete_cb => callback
+    print *, "Delete callback registered"
+  end subroutine register_delete_callback
 
   ! Mark that the initial scan has completed
   subroutine mark_initial_scan_complete()
@@ -254,7 +280,8 @@ contains
   end subroutine on_draw
 
   ! Keyboard callback - handle all keyboard navigation
-  function on_key_press(controller, keyval, keycode, state, user_data) bind(c) result(handled)
+  ! NOTE: MUST be recursive because GTK event processing can trigger nested calls
+  recursive function on_key_press(controller, keyval, keycode, state, user_data) bind(c) result(handled)
     use treemap_renderer, only: navigate_up, navigate_into_node, get_node_count, &
                                 get_node_center_by_index, find_node_in_direction, &
                                 find_node_at_position
@@ -397,8 +424,120 @@ contains
         call quit_cb()
       end if
       handled = 1_c_int
+
+    ! D key: Delete selected item
+    else if (keyval == GDK_KEY_d) then
+      print *, "D pressed - triggering delete"
+      if (associated(delete_cb)) then
+        call delete_cb()
+      end if
+      handled = 1_c_int
     end if
 
   end function on_key_press
+
+  ! Tooltip query callback - show file info on hover
+  function on_query_tooltip(widget, x, y, keyboard_mode, tooltip, user_data) bind(c) result(show_tooltip)
+    use types, only: file_node
+    use treemap_renderer, only: find_node_at_position
+    use iso_fortran_env, only: int64
+    type(c_ptr), value :: widget, tooltip, user_data
+    integer(c_int), value :: x, y, keyboard_mode
+    integer(c_int) :: show_tooltip
+    type(file_node), pointer :: current_view
+    integer :: hovered_index
+    character(len=512) :: tooltip_text
+    character(len=64) :: size_str
+    real(c_double) :: dx, dy
+    real :: size_mb, size_gb
+
+    show_tooltip = 0_c_int  ! Default: don't show tooltip
+
+    ! Convert coordinates to double for find_node_at_position
+    dx = real(x, c_double)
+    dy = real(y, c_double)
+
+    ! Find which node is at this position
+    hovered_index = find_node_at_position(dx, dy)
+
+    if (hovered_index > 0) then
+      ! Get current view node from renderer
+      current_view => get_current_view_node()
+      if (.not. associated(current_view)) return
+      if (.not. allocated(current_view%children)) return
+      if (hovered_index > current_view%num_children) return
+
+      ! Format the size nicely
+      if (current_view%children(hovered_index)%size < 1024_int64) then
+        write(size_str, '(I0,A)') current_view%children(hovered_index)%size, ' B'
+      else if (current_view%children(hovered_index)%size < 1024_int64**2) then
+        write(size_str, '(F0.2,A)') real(current_view%children(hovered_index)%size)/1024.0, ' KB'
+      else if (current_view%children(hovered_index)%size < 1024_int64**3) then
+        size_mb = real(current_view%children(hovered_index)%size)/(1024.0**2)
+        write(size_str, '(F0.2,A)') size_mb, ' MB'
+      else
+        size_gb = real(current_view%children(hovered_index)%size)/(1024.0**3)
+        write(size_str, '(F0.2,A)') size_gb, ' GB'
+      end if
+
+      ! Build tooltip text
+      if (current_view%children(hovered_index)%is_directory) then
+        write(tooltip_text, '(A,A,A,A,A,I0,A)') &
+          trim(current_view%children(hovered_index)%name), &
+          char(10), 'Size: ', trim(size_str), &
+          char(10), current_view%children(hovered_index)%num_children, ' items'
+      else
+        write(tooltip_text, '(A,A,A,A)') &
+          trim(current_view%children(hovered_index)%name), &
+          char(10), 'Size: ', trim(size_str)
+      end if
+
+      ! Set the tooltip text
+      call gtk_tooltip_set_text(tooltip, trim(tooltip_text)//c_null_char)
+      show_tooltip = 1_c_int  ! Show tooltip
+    end if
+
+  end function on_query_tooltip
+
+  ! Check if there is a selection
+  function has_selection() result(is_selected)
+    logical :: is_selected
+    is_selected = (selected_index > 0)
+  end function has_selection
+
+  ! Get the path of the currently selected node
+  function get_selected_node_path() result(path)
+    use types, only: file_node
+    character(len=:), allocatable :: path
+    type(file_node), pointer :: current_view
+
+    path = ""
+
+    ! Check if there is a selection
+    if (selected_index == 0) return
+
+    ! Get current view node from renderer
+    current_view => get_current_view_node()
+    if (.not. associated(current_view)) return
+
+    ! Check if the children array is allocated and index is valid
+    if (.not. allocated(current_view%children)) return
+    if (selected_index > current_view%num_children) return
+
+    ! Return the path of the selected child
+    path = trim(current_view%children(selected_index)%path)
+  end function get_selected_node_path
+
+  ! Get the index of the currently selected node
+  function get_selected_index() result(idx)
+    integer :: idx
+    idx = selected_index
+  end function get_selected_index
+
+  ! Clear the current selection
+  subroutine clear_selection()
+    selected_index = 0
+    print *, "Selection cleared"
+  end subroutine clear_selection
 
 end module treemap_widget

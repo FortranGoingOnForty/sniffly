@@ -18,7 +18,8 @@ module treemap_renderer
             scan_and_render_with_interaction, find_node_at_position, navigate_into_node, &
             navigate_up, get_breadcrumb_path, get_path_depth, get_node_count, &
             get_node_center_by_index, find_node_in_direction, register_progress_callback, &
-            scan_directory, invalidate_layout
+            scan_directory, invalidate_layout, get_current_view_node, remove_selected_node_from_view, &
+            clear_cache, toggle_file_extensions, toggle_age_based_coloring, toggle_size_display_mode
 
   ! Callback interfaces for progress updates
   abstract interface
@@ -56,6 +57,11 @@ module treemap_renderer
   ! Layout cache state
   logical, save :: layout_calculated = .false.
   integer, save :: last_width = 0, last_height = 0
+
+  ! View settings (Phase 5 features)
+  logical, save :: show_file_extensions = .true.     ! Toggle file extensions in labels
+  logical, save :: use_age_based_coloring = .false.  ! Color by file age instead of type
+  logical, save :: show_allocated_size = .false.     ! Show allocated size vs actual size
 
   ! Navigation path stack (for breadcrumbs)
   ! Simple approach: track path as array of names
@@ -100,21 +106,30 @@ contains
     node_ptr => root_node
   end function get_root_node
 
+  ! Get current view node (for external access)
+  function get_current_view_node() result(node_ptr)
+    type(file_node), pointer :: node_ptr
+    node_ptr => current_view_node
+  end function get_current_view_node
+
   ! Scan directory and prepare for rendering
   subroutine scan_directory(path)
     use, intrinsic :: iso_c_binding
     use disk_scanner, only: set_progress_callback
+    use file_system, only: get_absolute_path
     character(len=*), intent(in) :: path
+    character(len=:), allocatable :: expanded_path
     integer :: cache_index, i
     character(len=512) :: status_msg
     type(c_ptr) :: context
-    integer(c_int) :: events_processed
 
-    print *, "Scanning: ", trim(path)
+    ! Expand relative paths (like ./) to absolute paths for meaningful breadcrumbs
+    expanded_path = get_absolute_path(path)
+    print *, "Scanning: ", trim(expanded_path)
 
     ! Mark as having data IMMEDIATELY to prevent recursive scans
     has_data = .true.
-    scanned_path = trim(path)
+    scanned_path = trim(expanded_path)
 
     ! Register progress callback with disk_scanner
     if (associated(update_progress_cb)) then
@@ -132,7 +147,7 @@ contains
     end do
 
     ! Now update with initial message
-    write(status_msg, '(A,A)') 'Scanning: ', trim(path)
+    write(status_msg, '(A,A)') 'Scanning: ', trim(expanded_path)
     if (associated(update_progress_cb)) call update_progress_cb(0.1_c_double, status_msg)
 
     ! Process events again to show the update
@@ -142,7 +157,7 @@ contains
     end do
 
     ! Check cache first
-    cache_index = cache_lookup(path)
+    cache_index = cache_lookup(expanded_path)
     if (cache_index > 0) then
       ! Use cached scan (already colored)
       if (associated(update_progress_cb)) call update_progress_cb(0.5_c_double, 'Loading from cache...')
@@ -157,7 +172,7 @@ contains
       do while (g_main_context_iteration(context, 0_c_int) /= 0_c_int)
       end do
 
-      call build_tree(path, root_node)
+      call build_tree(expanded_path, root_node)
 
       ! Assign colors to nodes BEFORE caching
       if (associated(update_progress_cb)) call update_progress_cb(0.85_c_double, 'Assigning colors...')
@@ -168,7 +183,7 @@ contains
       call color_tree(root_node, 0)
 
       ! Store in cache (now with colors)
-      call cache_store(path, root_node)
+      call cache_store(expanded_path, root_node)
     end if
 
     ! Start view at root level (showing only top-level items)
@@ -218,6 +233,8 @@ contains
 
     if (associated(current_view_node) .and. current_view_node%size > 0) then
       call calculate_treemap(current_view_node, bounds)
+      ! Initialize cushion parameters for 3D shading
+      call init_cushions(current_view_node)
     end if
 
     ! Render only the current view (top-level items only)
@@ -253,6 +270,8 @@ contains
 
       if (associated(current_view_node) .and. current_view_node%size > 0) then
         call calculate_treemap(current_view_node, bounds)
+        ! Initialize cushion parameters for 3D shading
+        call init_cushions(current_view_node)
       end if
 
       layout_calculated = .true.
@@ -307,6 +326,8 @@ contains
 
       if (associated(current_view_node) .and. current_view_node%size > 0) then
         call calculate_treemap(current_view_node, bounds)
+        ! Initialize cushion parameters for 3D shading
+        call init_cushions(current_view_node)
       end if
 
       layout_calculated = .true.
@@ -407,6 +428,10 @@ contains
       print *, "Cannot navigate into file (not a directory)"
       return
     end if
+
+    ! Restore all sizes before navigating (in case they were modified by filtering/deletion)
+    print *, "Restoring sizes before navigation..."
+    call recalculate_sizes(root_node)
 
     ! Navigate into the directory
     current_view_node => current_view_node%children(index)
@@ -519,23 +544,87 @@ contains
     ! Go up the specified number of levels
     path_depth = max(1, path_depth - levels_to_go)
 
-    ! Navigate back up to the correct node
-    temp_node => root_node
-    do i = 2, path_depth
-      ! Find child matching path_names(i)
-      ! For now, just go to root if depth = 1
-      if (path_depth == 1) then
-        temp_node => root_node
-        exit
-      end if
-    end do
-    current_view_node => temp_node
+    ! Restore all sizes before navigating (in case they were modified by filtering/deletion)
+    print *, "Restoring sizes before navigation..."
+    call recalculate_sizes(root_node)
+
+    ! Navigate back up to the correct node by traversing from root
+    current_view_node => root_node
+
+    ! If we're deeper than root, traverse down to the correct node
+    if (path_depth > 1) then
+      do i = 2, path_depth
+        ! Find child matching path_names(i)
+        if (.not. allocated(current_view_node%children)) then
+          print *, "ERROR: Cannot navigate - current node has no children"
+          current_view_node => root_node
+          path_depth = 1
+          exit
+        end if
+
+        ! Search for matching child by name
+        temp_node => null()
+        do cache_index = 1, current_view_node%num_children
+          if (allocated(current_view_node%children(cache_index)%name)) then
+            if (trim(current_view_node%children(cache_index)%name) == trim(path_names(i))) then
+              temp_node => current_view_node%children(cache_index)
+              exit
+            end if
+          end if
+        end do
+
+        if (associated(temp_node)) then
+          current_view_node => temp_node
+        else
+          print *, "WARNING: Could not find child for path: ", trim(path_names(i))
+          current_view_node => root_node
+          path_depth = 1
+          exit
+        end if
+      end do
+    end if
 
     ! Reset layout cache
     layout_calculated = .false.
 
     print *, "Navigated up to depth: ", path_depth
+    if (allocated(current_view_node%path)) then
+      print *, "Current view: ", trim(current_view_node%path)
+    end if
   end subroutine navigate_up
+
+  ! Remove selected node from view (after deletion)
+  ! This marks the node with size 0 so it won't be rendered
+  subroutine remove_selected_node_from_view(selected_index)
+    integer, intent(in) :: selected_index
+
+    print *, "Removing node from view: index=", selected_index
+
+    ! Validate inputs
+    if (.not. associated(current_view_node)) then
+      print *, "ERROR: No current view node"
+      return
+    end if
+
+    if (.not. allocated(current_view_node%children)) then
+      print *, "ERROR: Current node has no children"
+      return
+    end if
+
+    if (selected_index < 1 .or. selected_index > current_view_node%num_children) then
+      print *, "ERROR: Invalid selected index: ", selected_index
+      return
+    end if
+
+    ! Mark the node as deleted by setting its size to 0
+    ! This will cause the layout algorithm to skip it
+    current_view_node%children(selected_index)%size = 0_int64
+
+    print *, "Node marked as deleted (size = 0)"
+
+    ! Invalidate layout so it gets recalculated without this node
+    layout_calculated = .false.
+  end subroutine remove_selected_node_from_view
 
   ! Get current path depth
   function get_path_depth() result(depth)
@@ -594,7 +683,7 @@ contains
     integer, intent(in) :: direction
     integer :: best_index
     integer :: i
-    real(real64) :: cx, cy, dx, dy, dist, score, best_score
+    real(real64) :: cx, cy, dx, dy, score, best_score
     real(real64) :: directional_component, perpendicular_component
 
     best_index = 0
@@ -751,7 +840,119 @@ contains
     call cairo_stroke(cr)
   end subroutine render_selection_highlight
 
-  ! Assign colors based on depth, file type, and sibling index for variation
+  ! Get file extension from filename
+  function get_file_extension(filename) result(ext)
+    character(len=*), intent(in) :: filename
+    character(len=:), allocatable :: ext
+    integer :: dot_pos, i, ascii_val
+    character(len=256) :: temp_ext
+
+    ! Find last dot in filename
+    dot_pos = 0
+    do i = len_trim(filename), 1, -1
+      if (filename(i:i) == '.') then
+        dot_pos = i
+        exit
+      end if
+    end do
+
+    if (dot_pos > 0 .and. dot_pos < len_trim(filename)) then
+      temp_ext = trim(filename(dot_pos+1:))
+      ! Convert to lowercase for comparison
+      do i = 1, len_trim(temp_ext)
+        ascii_val = iachar(temp_ext(i:i))
+        if (ascii_val >= 65 .and. ascii_val <= 90) then  ! A-Z
+          temp_ext(i:i) = achar(ascii_val + 32)
+        end if
+      end do
+      ext = trim(temp_ext)
+    else
+      ext = ""
+    end if
+  end function get_file_extension
+
+  ! Strip file extension from a filename (modifies in place)
+  subroutine strip_extension(filename)
+    character(len=*), intent(inout) :: filename
+    integer :: dot_pos, i
+
+    ! Find the last dot in the filename
+    dot_pos = 0
+    do i = len_trim(filename), 1, -1
+      if (filename(i:i) == '.') then
+        dot_pos = i
+        exit
+      end if
+      ! Stop at path separators (no dot in filename)
+      if (filename(i:i) == '/' .or. filename(i:i) == '\') then
+        exit
+      end if
+    end do
+
+    ! If dot found and not at start of filename, strip from dot onward
+    if (dot_pos > 1) then
+      filename(dot_pos:) = ' '  ! Replace with spaces
+    end if
+  end subroutine strip_extension
+
+  ! Get color hue based on file type
+  function get_file_type_hue(filename) result(hue)
+    use iso_fortran_env, only: real64
+    character(len=*), intent(in) :: filename
+    real(real64) :: hue
+    character(len=:), allocatable :: ext
+
+    ext = get_file_extension(filename)
+
+    ! Assign hue based on file type categories
+    ! Images: Green (120)
+    if (ext == "jpg" .or. ext == "jpeg" .or. ext == "png" .or. ext == "gif" .or. &
+        ext == "bmp" .or. ext == "svg" .or. ext == "ico" .or. ext == "webp" .or. &
+        ext == "tiff" .or. ext == "tif") then
+      hue = 120.0d0
+    ! Videos: Magenta (300)
+    else if (ext == "mp4" .or. ext == "avi" .or. ext == "mov" .or. ext == "mkv" .or. &
+             ext == "flv" .or. ext == "wmv" .or. ext == "webm" .or. ext == "m4v" .or. &
+             ext == "mpg" .or. ext == "mpeg") then
+      hue = 300.0d0
+    ! Audio: Cyan (180)
+    else if (ext == "mp3" .or. ext == "wav" .or. ext == "flac" .or. ext == "aac" .or. &
+             ext == "ogg" .or. ext == "wma" .or. ext == "m4a" .or. ext == "opus") then
+      hue = 180.0d0
+    ! Documents: Yellow (60)
+    else if (ext == "pdf" .or. ext == "doc" .or. ext == "docx" .or. ext == "txt" .or. &
+             ext == "rtf" .or. ext == "odt" .or. ext == "pages" .or. ext == "md") then
+      hue = 60.0d0
+    ! Archives: Red (0)
+    else if (ext == "zip" .or. ext == "tar" .or. ext == "gz" .or. ext == "rar" .or. &
+             ext == "7z" .or. ext == "bz2" .or. ext == "xz" .or. ext == "tgz" .or. &
+             ext == "dmg" .or. ext == "iso") then
+      hue = 0.0d0
+    ! Code: Orange (30)
+    else if (ext == "py" .or. ext == "js" .or. ext == "java" .or. ext == "c" .or. &
+             ext == "cpp" .or. ext == "h" .or. ext == "rs" .or. ext == "go" .or. &
+             ext == "rb" .or. ext == "php" .or. ext == "f90" .or. ext == "f95" .or. &
+             ext == "f03" .or. ext == "f08" .or. ext == "ts" .or. ext == "jsx" .or. &
+             ext == "tsx" .or. ext == "swift" .or. ext == "kt") then
+      hue = 30.0d0
+    ! Spreadsheets: Lime (90)
+    else if (ext == "xls" .or. ext == "xlsx" .or. ext == "csv" .or. ext == "ods" .or. &
+             ext == "numbers") then
+      hue = 90.0d0
+    ! Presentations: Rose (330)
+    else if (ext == "ppt" .or. ext == "pptx" .or. ext == "odp" .or. ext == "key") then
+      hue = 330.0d0
+    ! Executables: Dark Red (15)
+    else if (ext == "exe" .or. ext == "app" .or. ext == "bin" .or. ext == "sh" .or. &
+             ext == "bat" .or. ext == "com") then
+      hue = 15.0d0
+    ! Default: Gray tone (0 with low saturation handled by caller)
+    else
+      hue = 0.0d0
+    end if
+  end function get_file_type_hue
+
+  ! Assign colors based on file type
   recursive subroutine color_tree(node, depth)
     use iso_fortran_env, only: real64
     type(file_node), intent(inout) :: node
@@ -759,28 +960,39 @@ contains
     integer :: i
     real(real64) :: hue, hue_offset
 
-    ! Color based on depth (alternating hues)
-    hue = mod(depth * 60.0, 360.0)  ! 0, 60, 120, 180, 240, 300
-
     if (node%is_directory) then
-      ! Directories: blue-ish tones
+      ! Directories: blue-ish tones with depth variation
+      hue = mod(depth * 60.0, 360.0)  ! 0, 60, 120, 180, 240, 300
       node%color = hsv_to_rgb(hue, 0.6d0, 0.8d0)
     else
-      ! Files: warmer tones
-      node%color = hsv_to_rgb(hue + 30.0, 0.5d0, 0.9d0)
+      ! Files: color by file type
+      hue = get_file_type_hue(node%name)
+      if (abs(hue) < 0.01d0 .and. len_trim(get_file_extension(node%name)) == 0) then
+        ! No extension - use gray
+        node%color = hsv_to_rgb(0.0d0, 0.1d0, 0.8d0)
+      else
+        node%color = hsv_to_rgb(hue, 0.7d0, 0.9d0)
+      end if
     end if
 
     ! Recurse to children with varying hues for siblings
     if (allocated(node%children)) then
       do i = 1, node%num_children
-        ! Calculate hue offset based on sibling index (spread across 360 degrees)
-        hue_offset = real(mod(i * 37, 360), real64)  ! 37 is prime for good distribution
-
-        ! Apply variation to child
+        ! For directories, calculate hue offset based on sibling index
         if (node%children(i)%is_directory) then
+          hue = mod(depth * 60.0, 360.0)
+          hue_offset = real(mod(i * 37, 360), real64)  ! 37 is prime for good distribution
           node%children(i)%color = hsv_to_rgb(hue + hue_offset, 0.6d0, 0.8d0)
         else
-          node%children(i)%color = hsv_to_rgb(hue + hue_offset + 30.0, 0.5d0, 0.9d0)
+          ! For files, use file type color
+          hue = get_file_type_hue(node%children(i)%name)
+          if (abs(hue) < 0.01d0 .and. len_trim(get_file_extension(node%children(i)%name)) == 0) then
+            node%children(i)%color = hsv_to_rgb(0.0d0, 0.1d0, 0.8d0)
+          else
+            ! Add slight variation based on sibling index
+            hue_offset = real(mod(i * 5, 30), real64) - 15.0d0  ! Vary by ±15 degrees
+            node%children(i)%color = hsv_to_rgb(hue + hue_offset, 0.7d0, 0.9d0)
+          end if
         end if
 
         ! Recurse with increased depth
@@ -788,6 +1000,70 @@ contains
       end do
     end if
   end subroutine color_tree
+
+  ! Initialize cushion parameters for treemap nodes
+  ! Based on Van Wijk & Van de Wetering algorithm
+  recursive subroutine init_cushions(node, parent_cushion)
+    use iso_fortran_env, only: real64
+    type(file_node), intent(inout) :: node
+    type(cushion_params), intent(in), optional :: parent_cushion
+    real(real64) :: x, y, w, h, cx, cy
+    real(real64) :: f  ! Ridge height factor
+    integer :: i
+
+    ! Ridge height factor (controls the "bumpiness" of the cushion)
+    f = 0.5d0
+
+    ! Get rectangle bounds
+    x = real(node%bounds%x, real64)
+    y = real(node%bounds%y, real64)
+    w = real(node%bounds%width, real64)
+    h = real(node%bounds%height, real64)
+
+    ! Calculate center
+    cx = x + w / 2.0d0
+    cy = y + h / 2.0d0
+
+    ! Initialize or inherit cushion parameters
+    if (present(parent_cushion)) then
+      ! Inherit parent cushion and add our own
+      node%cushion%ax = parent_cushion%ax
+      node%cushion%ay = parent_cushion%ay
+      node%cushion%bx = parent_cushion%bx
+      node%cushion%by = parent_cushion%by
+      node%cushion%c = parent_cushion%c
+      node%cushion%depth = parent_cushion%depth + 1
+    else
+      ! Root node - initialize to zero
+      node%cushion%ax = 0.0d0
+      node%cushion%ay = 0.0d0
+      node%cushion%bx = 0.0d0
+      node%cushion%by = 0.0d0
+      node%cushion%c = 0.0d0
+      node%cushion%depth = 0
+    end if
+
+    ! Add this node's cushion ridge
+    if (w > 0.0d0 .and. h > 0.0d0) then
+      ! Add quadratic terms
+      node%cushion%ax = node%cushion%ax + f / (w * w)
+      node%cushion%ay = node%cushion%ay + f / (h * h)
+
+      ! Add linear terms
+      node%cushion%bx = node%cushion%bx - 2.0d0 * (f / (w * w)) * cx
+      node%cushion%by = node%cushion%by - 2.0d0 * (f / (h * h)) * cy
+
+      ! Add constant term
+      node%cushion%c = node%cushion%c + (f / (w * w)) * cx * cx + (f / (h * h)) * cy * cy
+    end if
+
+    ! Recursively init children
+    if (allocated(node%children)) then
+      do i = 1, node%num_children
+        call init_cushions(node%children(i), node%cushion)
+      end do
+    end if
+  end subroutine init_cushions
 
   ! Simple HSV to RGB conversion
   function hsv_to_rgb(h, s, v) result(color)
@@ -797,9 +1073,9 @@ contains
     real(real64) :: c, x, m, h_prime
     integer :: sector
 
-    h_prime = h / 60.0
+    h_prime = h / 60.0d0
     c = v * s
-    x = c * (1.0 - abs(mod(h_prime, 2.0) - 1.0))
+    x = c * (1.0d0 - abs(mod(h_prime, 2.0d0) - 1.0d0))
     m = v - c
 
     sector = int(h_prime)
@@ -822,22 +1098,66 @@ contains
 
   ! Render only the current view (direct children only, no recursion)
   subroutine render_current_view(cr, view_node, bounds)
+    use cairo, only: cairo_set_source_rgb, cairo_move_to, cairo_show_text, &
+                     cairo_set_font_size, cairo_select_font_face
     type(c_ptr), intent(in) :: cr
     type(file_node), intent(in) :: view_node
     type(rect), intent(in) :: bounds
-    integer :: i
+    integer :: i, visible_count
+    real(c_double) :: center_x, center_y
 
     ! Render only the direct children of the current view
-    if (allocated(view_node%children)) then
+    if (allocated(view_node%children) .and. view_node%num_children > 0) then
       print *, "DEBUG: Rendering", view_node%num_children, "children"
+
+      ! Count visible nodes
+      visible_count = 0
       do i = 1, view_node%num_children
-        print *, "DEBUG: Rendering child", i, "bounds:", &
-                 view_node%children(i)%bounds%x, view_node%children(i)%bounds%y, &
-                 view_node%children(i)%bounds%width, view_node%children(i)%bounds%height
+        ! Skip nodes without names (shouldn't happen but be defensive)
+        if (.not. allocated(view_node%children(i)%name)) cycle
+
+        if (view_node%children(i)%size > 0) then
+          visible_count = visible_count + 1
+          if (visible_count <= 5) then
+            print *, "DEBUG: Visible child", i, ":", trim(view_node%children(i)%name), &
+                     "size=", view_node%children(i)%size, "original=", view_node%children(i)%original_size
+          end if
+        end if
+      end do
+      print *, "DEBUG: Total visible children:", visible_count, "of", view_node%num_children
+
+      do i = 1, view_node%num_children
+        ! Skip nodes without names (shouldn't happen but be defensive)
+        if (.not. allocated(view_node%children(i)%name)) cycle
+
+        ! Skip nodes with size 0 (deleted)
+        if (view_node%children(i)%size == 0) then
+          cycle
+        end if
+
         call render_node(cr, view_node%children(i))
       end do
     else
-      print *, "DEBUG: view_node has NO children allocated!"
+      ! Empty directory - show warning message
+      print *, "DEBUG: Empty directory - showing warning"
+
+      ! Draw warning text in center
+      center_x = real(bounds%width, c_double) / 2.0_c_double
+      center_y = real(bounds%height, c_double) / 2.0_c_double
+
+      ! Set color to yellow/orange for warning
+      call cairo_set_source_rgb(cr, 0.9_c_double, 0.6_c_double, 0.0_c_double)
+      ! cairo font: family, slant (0=normal), weight (1=bold)
+      call cairo_select_font_face(cr, "Sans"//c_null_char, 0_c_int, 1_c_int)
+      call cairo_set_font_size(cr, 24.0_c_double)
+
+      ! Center the text (approximate)
+      call cairo_move_to(cr, center_x - 100.0_c_double, center_y - 30.0_c_double)
+      call cairo_show_text(cr, "Empty Directory"//c_null_char)
+
+      call cairo_set_font_size(cr, 14.0_c_double)
+      call cairo_move_to(cr, center_x - 120.0_c_double, center_y + 10.0_c_double)
+      call cairo_show_text(cr, "Press Backspace to go up"//c_null_char)
     end if
   end subroutine render_current_view
 
@@ -846,6 +1166,7 @@ contains
     type(c_ptr), intent(in) :: cr
     type(file_node), intent(in) :: node
     real(c_double) :: x, y, w, h
+    real(c_double) :: shaded_r, shaded_g, shaded_b, shading
     logical :: can_show_label
 
     ! Don't render tiny rectangles
@@ -859,8 +1180,16 @@ contains
     ! Check if we can show a full label
     can_show_label = (w >= 50.0d0 .and. h >= 20.0d0)
 
-    ! Fill rectangle with color
-    call cairo_set_source_rgb(cr, node%color%r, node%color%g, node%color%b)
+    ! Calculate cushion shading
+    shading = calculate_cushion_shading(x, y, w, h, node%cushion)
+
+    ! Apply shading to base color
+    shaded_r = node%color%r * shading
+    shaded_g = node%color%g * shading
+    shaded_b = node%color%b * shading
+
+    ! Fill rectangle with shaded color
+    call cairo_set_source_rgb(cr, shaded_r, shaded_g, shaded_b)
     call cairo_rectangle(cr, x, y, w, h)
     call cairo_fill(cr)
 
@@ -885,6 +1214,61 @@ contains
       end if
     end if
   end subroutine render_node
+
+  ! Calculate cushion shading intensity using Van Wijk algorithm
+  ! Returns a factor between 0.0 (dark) and 1.0 (bright)
+  function calculate_cushion_shading(x, y, w, h, cushion) result(intensity)
+    use iso_fortran_env, only: real64
+    real(c_double), intent(in) :: x, y, w, h
+    type(cushion_params), intent(in) :: cushion
+    real(real64) :: intensity
+    real(real64) :: cx, cy  ! Center of rectangle
+    real(real64) :: nx, ny, nz, norm  ! Normal vector
+    real(real64) :: lx, ly, lz  ! Light direction (from top-left)
+    real(real64) :: dot_product
+    real(real64) :: ambient, diffuse
+
+    ! Light source direction (normalized) - coming from top-left at 45 degrees
+    lx = -0.5d0
+    ly = -0.5d0
+    lz = 0.707d0  ! sqrt(1 - lx^2 - ly^2)
+
+    ! Ambient and diffuse lighting coefficients
+    ambient = 0.4d0  ! Base lighting
+    diffuse = 0.6d0  ! Directional lighting strength
+
+    ! Calculate center of rectangle
+    cx = x + w / 2.0d0
+    cy = y + h / 2.0d0
+
+    ! Calculate surface gradient (partial derivatives)
+    ! h(x,y) = ax*x² + bx*x + ay*y² + by*y + c
+    ! ∂h/∂x = 2*ax*x + bx
+    ! ∂h/∂y = 2*ay*y + by
+    nx = -(2.0d0 * cushion%ax * cx + cushion%bx)
+    ny = -(2.0d0 * cushion%ay * cy + cushion%by)
+    nz = 1.0d0
+
+    ! Normalize the normal vector
+    norm = sqrt(nx*nx + ny*ny + nz*nz)
+    if (norm > 0.0d0) then
+      nx = nx / norm
+      ny = ny / norm
+      nz = nz / norm
+    else
+      nx = 0.0d0
+      ny = 0.0d0
+      nz = 1.0d0
+    end if
+
+    ! Calculate Lambertian shading (dot product of normal and light direction)
+    dot_product = nx*lx + ny*ly + nz*lz
+    dot_product = max(0.0d0, dot_product)  ! Clamp negative values
+
+    ! Combine ambient and diffuse lighting
+    intensity = ambient + diffuse * dot_product
+    intensity = min(1.0d0, max(0.0d0, intensity))  ! Clamp to [0,1]
+  end function calculate_cushion_shading
 
   ! Render ellipsis for small rectangles
   subroutine render_ellipsis(cr, x, y, w, h)
@@ -971,6 +1355,59 @@ contains
     print *, "Cached scan for: ", trim(path), " at index ", store_index
   end subroutine cache_store
 
+  ! Clear all cached directory scans
+  subroutine clear_cache()
+    integer :: i
+
+    ! Invalidate all cache entries
+    do i = 1, cache_count
+      dir_cache(i)%valid = .false.
+      dir_cache(i)%path = ""
+    end do
+    cache_count = 0
+    print *, "Directory cache cleared"
+  end subroutine clear_cache
+
+  ! Toggle file extensions in labels
+  subroutine toggle_file_extensions()
+    show_file_extensions = .not. show_file_extensions
+    if (show_file_extensions) then
+      print *, "File extensions enabled"
+    else
+      print *, "File extensions disabled"
+    end if
+    ! Invalidate layout to force redraw
+    call invalidate_layout()
+  end subroutine toggle_file_extensions
+
+  ! Toggle age-based coloring
+  subroutine toggle_age_based_coloring()
+    use_age_based_coloring = .not. use_age_based_coloring
+    if (use_age_based_coloring) then
+      print *, "Age-based coloring enabled"
+    else
+      print *, "File type coloring enabled"
+    end if
+    ! Need to recolor tree and redraw
+    if (has_data) then
+      call color_tree(root_node, 0)
+      call invalidate_layout()
+    end if
+  end subroutine toggle_age_based_coloring
+
+  ! Toggle size display mode (actual vs allocated)
+  subroutine toggle_size_display_mode()
+    show_allocated_size = .not. show_allocated_size
+    if (show_allocated_size) then
+      print *, "Showing allocated size (disk usage)"
+    else
+      print *, "Showing actual size"
+    end if
+    ! For now just a stub - would need to rescan with disk usage info
+    ! Just invalidate layout to force redraw
+    call invalidate_layout()
+  end subroutine toggle_size_display_mode
+
   ! Render text label for a node
   subroutine render_label(cr, node, x, y, w, h)
     use iso_fortran_env, only: int64
@@ -979,7 +1416,6 @@ contains
     real(c_double), intent(in) :: x, y, w, h
     real(c_double) :: font_size, text_x, text_y, size_font
     integer :: min_width, min_height
-    character(len=:), allocatable :: display_name
     character(len=256) :: name_copy
     character(len=20) :: size_text
 
@@ -997,6 +1433,11 @@ contains
     ! Get the file/directory name
     if (allocated(node%name)) then
       name_copy = node%name
+
+      ! Strip extension if show_file_extensions is false and it's a file
+      if (.not. show_file_extensions .and. .not. node%is_directory) then
+        call strip_extension(name_copy)
+      end if
     else
       return  ! No name to display
     end if
@@ -1039,5 +1480,36 @@ contains
       call cairo_show_text(cr, trim(size_text)//c_null_char)
     end if
   end subroutine render_label
+
+  ! Recursively recalculate directory sizes from their children
+  ! This restores sizes that may have been set to 0 by filtering
+  recursive subroutine recalculate_sizes(node)
+    type(file_node), intent(inout) :: node
+    integer :: i
+
+    ! If this is a file, restore from original_size backup
+    ! (original_size is always set during scanning, even for empty files)
+    if (.not. node%is_directory) then
+      node%size = node%original_size
+      return
+    end if
+
+    ! Directories: recalculate from children
+    if (allocated(node%children) .and. node%num_children > 0) then
+      ! First recalculate all children recursively
+      do i = 1, node%num_children
+        call recalculate_sizes(node%children(i))
+      end do
+
+      ! Then sum up children sizes
+      node%size = 0_int64
+      do i = 1, node%num_children
+        node%size = node%size + node%children(i)%size
+      end do
+    else
+      ! Empty directory
+      node%size = 0_int64
+    end if
+  end subroutine recalculate_sizes
 
 end module treemap_renderer
