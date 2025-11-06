@@ -228,6 +228,8 @@ contains
 
     if (associated(current_view_node) .and. current_view_node%size > 0) then
       call calculate_treemap(current_view_node, bounds)
+      ! Initialize cushion parameters for 3D shading
+      call init_cushions(current_view_node)
     end if
 
     ! Render only the current view (top-level items only)
@@ -263,6 +265,8 @@ contains
 
       if (associated(current_view_node) .and. current_view_node%size > 0) then
         call calculate_treemap(current_view_node, bounds)
+        ! Initialize cushion parameters for 3D shading
+        call init_cushions(current_view_node)
       end if
 
       layout_calculated = .true.
@@ -317,6 +321,8 @@ contains
 
       if (associated(current_view_node) .and. current_view_node%size > 0) then
         call calculate_treemap(current_view_node, bounds)
+        ! Initialize cushion parameters for 3D shading
+        call init_cushions(current_view_node)
       end if
 
       layout_calculated = .true.
@@ -966,6 +972,70 @@ contains
     end if
   end subroutine color_tree
 
+  ! Initialize cushion parameters for treemap nodes
+  ! Based on Van Wijk & Van de Wetering algorithm
+  recursive subroutine init_cushions(node, parent_cushion)
+    use iso_fortran_env, only: real64
+    type(file_node), intent(inout) :: node
+    type(cushion_params), intent(in), optional :: parent_cushion
+    real(real64) :: x, y, w, h, cx, cy
+    real(real64) :: f  ! Ridge height factor
+    integer :: i
+
+    ! Ridge height factor (controls the "bumpiness" of the cushion)
+    f = 0.5d0
+
+    ! Get rectangle bounds
+    x = real(node%bounds%x, real64)
+    y = real(node%bounds%y, real64)
+    w = real(node%bounds%width, real64)
+    h = real(node%bounds%height, real64)
+
+    ! Calculate center
+    cx = x + w / 2.0d0
+    cy = y + h / 2.0d0
+
+    ! Initialize or inherit cushion parameters
+    if (present(parent_cushion)) then
+      ! Inherit parent cushion and add our own
+      node%cushion%ax = parent_cushion%ax
+      node%cushion%ay = parent_cushion%ay
+      node%cushion%bx = parent_cushion%bx
+      node%cushion%by = parent_cushion%by
+      node%cushion%c = parent_cushion%c
+      node%cushion%depth = parent_cushion%depth + 1
+    else
+      ! Root node - initialize to zero
+      node%cushion%ax = 0.0d0
+      node%cushion%ay = 0.0d0
+      node%cushion%bx = 0.0d0
+      node%cushion%by = 0.0d0
+      node%cushion%c = 0.0d0
+      node%cushion%depth = 0
+    end if
+
+    ! Add this node's cushion ridge
+    if (w > 0.0d0 .and. h > 0.0d0) then
+      ! Add quadratic terms
+      node%cushion%ax = node%cushion%ax + f / (w * w)
+      node%cushion%ay = node%cushion%ay + f / (h * h)
+
+      ! Add linear terms
+      node%cushion%bx = node%cushion%bx - 2.0d0 * (f / (w * w)) * cx
+      node%cushion%by = node%cushion%by - 2.0d0 * (f / (h * h)) * cy
+
+      ! Add constant term
+      node%cushion%c = node%cushion%c + (f / (w * w)) * cx * cx + (f / (h * h)) * cy * cy
+    end if
+
+    ! Recursively init children
+    if (allocated(node%children)) then
+      do i = 1, node%num_children
+        call init_cushions(node%children(i), node%cushion)
+      end do
+    end if
+  end subroutine init_cushions
+
   ! Simple HSV to RGB conversion
   function hsv_to_rgb(h, s, v) result(color)
     use iso_fortran_env, only: real64
@@ -1067,6 +1137,7 @@ contains
     type(c_ptr), intent(in) :: cr
     type(file_node), intent(in) :: node
     real(c_double) :: x, y, w, h
+    real(c_double) :: shaded_r, shaded_g, shaded_b, shading
     logical :: can_show_label
 
     ! Don't render tiny rectangles
@@ -1080,8 +1151,16 @@ contains
     ! Check if we can show a full label
     can_show_label = (w >= 50.0d0 .and. h >= 20.0d0)
 
-    ! Fill rectangle with color
-    call cairo_set_source_rgb(cr, node%color%r, node%color%g, node%color%b)
+    ! Calculate cushion shading
+    shading = calculate_cushion_shading(x, y, w, h, node%cushion)
+
+    ! Apply shading to base color
+    shaded_r = node%color%r * shading
+    shaded_g = node%color%g * shading
+    shaded_b = node%color%b * shading
+
+    ! Fill rectangle with shaded color
+    call cairo_set_source_rgb(cr, shaded_r, shaded_g, shaded_b)
     call cairo_rectangle(cr, x, y, w, h)
     call cairo_fill(cr)
 
@@ -1106,6 +1185,61 @@ contains
       end if
     end if
   end subroutine render_node
+
+  ! Calculate cushion shading intensity using Van Wijk algorithm
+  ! Returns a factor between 0.0 (dark) and 1.0 (bright)
+  function calculate_cushion_shading(x, y, w, h, cushion) result(intensity)
+    use iso_fortran_env, only: real64
+    real(c_double), intent(in) :: x, y, w, h
+    type(cushion_params), intent(in) :: cushion
+    real(real64) :: intensity
+    real(real64) :: cx, cy  ! Center of rectangle
+    real(real64) :: nx, ny, nz, norm  ! Normal vector
+    real(real64) :: lx, ly, lz  ! Light direction (from top-left)
+    real(real64) :: dot_product
+    real(real64) :: ambient, diffuse
+
+    ! Light source direction (normalized) - coming from top-left at 45 degrees
+    lx = -0.5d0
+    ly = -0.5d0
+    lz = 0.707d0  ! sqrt(1 - lx^2 - ly^2)
+
+    ! Ambient and diffuse lighting coefficients
+    ambient = 0.4d0  ! Base lighting
+    diffuse = 0.6d0  ! Directional lighting strength
+
+    ! Calculate center of rectangle
+    cx = x + w / 2.0d0
+    cy = y + h / 2.0d0
+
+    ! Calculate surface gradient (partial derivatives)
+    ! h(x,y) = ax*x² + bx*x + ay*y² + by*y + c
+    ! ∂h/∂x = 2*ax*x + bx
+    ! ∂h/∂y = 2*ay*y + by
+    nx = -(2.0d0 * cushion%ax * cx + cushion%bx)
+    ny = -(2.0d0 * cushion%ay * cy + cushion%by)
+    nz = 1.0d0
+
+    ! Normalize the normal vector
+    norm = sqrt(nx*nx + ny*ny + nz*nz)
+    if (norm > 0.0d0) then
+      nx = nx / norm
+      ny = ny / norm
+      nz = nz / norm
+    else
+      nx = 0.0d0
+      ny = 0.0d0
+      nz = 1.0d0
+    end if
+
+    ! Calculate Lambertian shading (dot product of normal and light direction)
+    dot_product = nx*lx + ny*ly + nz*lz
+    dot_product = max(0.0d0, dot_product)  ! Clamp negative values
+
+    ! Combine ambient and diffuse lighting
+    intensity = ambient + diffuse * dot_product
+    intensity = min(1.0d0, max(0.0d0, intensity))  ! Clamp to [0,1]
+  end function calculate_cushion_shading
 
   ! Render ellipsis for small rectangles
   subroutine render_ellipsis(cr, x, y, w, h)

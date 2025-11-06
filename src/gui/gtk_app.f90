@@ -18,6 +18,7 @@ module gtk_app
                  gtk_entry_new, gtk_entry_buffer_set_text, gtk_entry_get_buffer, &
                  gtk_editable_set_editable, gtk_editable_get_text, &
                  gtk_entry_set_placeholder_text
+  use gdk, only: gdk_display_get_default, gdk_display_get_clipboard, gdk_clipboard_set_text
   use g, only: g_application_run, g_idle_add
   use treemap_widget, only: create_treemap_widget, set_scan_path, register_navigation_callback, &
                              register_key_handler, register_quit_callback, register_delete_callback, &
@@ -98,7 +99,7 @@ contains
   ! Callback when application activates (startup)
   subroutine on_activate(app, user_data) bind(c)
     type(c_ptr), value :: app, user_data
-    type(c_ptr) :: drawing_area, main_box, toolbar, open_dir_btn, scan_btn, open_finder_btn, delete_btn, status_bar, breadcrumb_bar
+    type(c_ptr) :: drawing_area, main_box, toolbar, open_dir_btn, scan_btn, open_finder_btn, copy_path_btn, delete_btn, status_bar, breadcrumb_bar
     character(len=512) :: scan_path
     integer(c_int) :: idle_id
 
@@ -166,7 +167,14 @@ contains
                            c_funloc(on_open_finder_clicked), c_null_ptr)
     call gtk_box_append(toolbar, open_finder_btn)
 
-    ! Create Delete button (floated right after Open in Finder)
+    ! Create Copy Path button
+    copy_path_btn = gtk_button_new()
+    call gtk_button_set_icon_name(copy_path_btn, "edit-copy"//c_null_char)
+    call g_signal_connect(copy_path_btn, "clicked"//c_null_char, &
+                           c_funloc(on_copy_path_clicked), c_null_ptr)
+    call gtk_box_append(toolbar, copy_path_btn)
+
+    ! Create Delete button (floated right after Copy Path)
     delete_btn = gtk_button_new()
     call gtk_button_set_icon_name(delete_btn, "user-trash"//c_null_char)
     call g_signal_connect(delete_btn, "clicked"//c_null_char, &
@@ -323,6 +331,56 @@ contains
     print *, "Opening in Finder: ", trim(selected_path)
     call open_in_file_manager(selected_path)
   end subroutine on_open_finder_clicked
+
+  ! Callback when Copy Path button is clicked
+  subroutine on_copy_path_clicked(button, user_data) bind(c)
+    type(c_ptr), value :: button, user_data
+    character(len=:), allocatable :: selected_path
+    type(c_ptr) :: display, clipboard
+
+    print *, "Copy Path button clicked!"
+
+    ! Check if there's a selection
+    if (.not. has_selection()) then
+      print *, "No selection - cannot copy path"
+      call sniffly_update_status("No selection to copy")
+      return
+    end if
+
+    ! Get the selected node path
+    selected_path = get_selected_node_path()
+
+    if (len_trim(selected_path) == 0) then
+      print *, "Invalid selection path"
+      call sniffly_update_status("Invalid selection path")
+      return
+    end if
+
+    print *, "Copying path to clipboard: ", trim(selected_path)
+
+    ! Get the default display
+    display = gdk_display_get_default()
+    if (.not. c_associated(display)) then
+      print *, "ERROR: Failed to get default display"
+      call sniffly_update_status("Failed to access clipboard")
+      return
+    end if
+
+    ! Get the clipboard from the display
+    clipboard = gdk_display_get_clipboard(display)
+    if (.not. c_associated(clipboard)) then
+      print *, "ERROR: Failed to get clipboard"
+      call sniffly_update_status("Failed to access clipboard")
+      return
+    end if
+
+    ! Convert Fortran string to C string and set clipboard
+    call gdk_clipboard_set_text(clipboard, trim(selected_path)//c_null_char)
+
+    ! Update status
+    call sniffly_update_status("Path copied to clipboard: " // trim(selected_path))
+    print *, "Path copied successfully!"
+  end subroutine on_copy_path_clicked
 
   ! Callback when Delete button is clicked
   subroutine on_delete_clicked(button, user_data) bind(c)
