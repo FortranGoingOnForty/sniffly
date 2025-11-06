@@ -116,7 +116,6 @@ contains
     integer :: cache_index, i
     character(len=512) :: status_msg
     type(c_ptr) :: context
-    integer(c_int) :: events_processed
 
     ! Expand relative paths (like ./) to absolute paths for meaningful breadcrumbs
     expanded_path = get_absolute_path(path)
@@ -678,7 +677,7 @@ contains
     integer, intent(in) :: direction
     integer :: best_index
     integer :: i
-    real(real64) :: cx, cy, dx, dy, dist, score, best_score
+    real(real64) :: cx, cy, dx, dy, score, best_score
     real(real64) :: directional_component, perpendicular_component
 
     best_index = 0
@@ -938,7 +937,7 @@ contains
     else
       ! Files: color by file type
       hue = get_file_type_hue(node%name)
-      if (hue == 0.0d0 .and. len_trim(get_file_extension(node%name)) == 0) then
+      if (abs(hue) < 0.01d0 .and. len_trim(get_file_extension(node%name)) == 0) then
         ! No extension - use gray
         node%color = hsv_to_rgb(0.0d0, 0.1d0, 0.8d0)
       else
@@ -957,7 +956,7 @@ contains
         else
           ! For files, use file type color
           hue = get_file_type_hue(node%children(i)%name)
-          if (hue == 0.0d0 .and. len_trim(get_file_extension(node%children(i)%name)) == 0) then
+          if (abs(hue) < 0.01d0 .and. len_trim(get_file_extension(node%children(i)%name)) == 0) then
             node%children(i)%color = hsv_to_rgb(0.0d0, 0.1d0, 0.8d0)
           else
             ! Add slight variation based on sibling index
@@ -1044,9 +1043,9 @@ contains
     real(real64) :: c, x, m, h_prime
     integer :: sector
 
-    h_prime = h / 60.0
+    h_prime = h / 60.0d0
     c = v * s
-    x = c * (1.0 - abs(mod(h_prime, 2.0) - 1.0))
+    x = c * (1.0d0 - abs(mod(h_prime, 2.0d0) - 1.0d0))
     m = v - c
 
     sector = int(h_prime)
@@ -1334,7 +1333,6 @@ contains
     real(c_double), intent(in) :: x, y, w, h
     real(c_double) :: font_size, text_x, text_y, size_font
     integer :: min_width, min_height
-    character(len=:), allocatable :: display_name
     character(len=256) :: name_copy
     character(len=20) :: size_text
 

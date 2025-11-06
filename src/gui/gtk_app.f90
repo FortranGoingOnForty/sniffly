@@ -274,10 +274,10 @@ contains
       ! Update global scan path (but don't scan yet)
       ! Remove trailing slash if present (C code doesn't like it)
       if (len_trim(selected_path) > 1 .and. selected_path(len_trim(selected_path):len_trim(selected_path)) == '/') then
-        global_scan_path = selected_path(1:len_trim(selected_path)-1)
+        global_scan_path = trim(selected_path(1:len_trim(selected_path)-1))
         print *, "DEBUG: Removed trailing slash from path"
       else
-        global_scan_path = selected_path
+        global_scan_path = trim(selected_path)
       end if
       print *, "DEBUG: Set global_scan_path to: '", trim(global_scan_path), "'"
       call set_scan_path(trim(global_scan_path))
@@ -419,32 +419,35 @@ contains
     end if
   end subroutine on_delete_clicked
 
-  ! Helper to convert C string to Fortran string
-  subroutine c_f_string(c_str_ptr, f_str)
-    type(c_ptr), intent(in) :: c_str_ptr
-    character(len=*), intent(out) :: f_str
-    character(len=1, kind=c_char), pointer :: c_chars(:)
-    integer :: i, str_len
+  ! Commented out unused helper function - was used by removed search/filter feature
+  ! Uncomment if needed in future
 
-    f_str = ""
-    if (.not. c_associated(c_str_ptr)) return
-
-    ! Get string length
-    str_len = 0
-    do i = 1, len(f_str)
-      call c_f_pointer(c_str_ptr, c_chars, [i])
-      if (c_chars(i) == c_null_char) exit
-      str_len = i
-    end do
-
-    ! Copy characters
-    if (str_len > 0) then
-      call c_f_pointer(c_str_ptr, c_chars, [str_len])
-      do i = 1, str_len
-        f_str(i:i) = c_chars(i)
-      end do
-    end if
-  end subroutine c_f_string
+  ! ! Helper to convert C string to Fortran string
+  ! subroutine c_f_string(c_str_ptr, f_str)
+  !   type(c_ptr), intent(in) :: c_str_ptr
+  !   character(len=*), intent(out) :: f_str
+  !   character(len=1, kind=c_char), pointer :: c_chars(:)
+  !   integer :: i, str_len
+  !
+  !   f_str = ""
+  !   if (.not. c_associated(c_str_ptr)) return
+  !
+  !   ! Get string length
+  !   str_len = 0
+  !   do i = 1, len(f_str)
+  !     call c_f_pointer(c_str_ptr, c_chars, [i])
+  !     if (c_chars(i) == c_null_char) exit
+  !     str_len = i
+  !   end do
+  !
+  !   ! Copy characters
+  !   if (str_len > 0) then
+  !     call c_f_pointer(c_str_ptr, c_chars, [str_len])
+  !     do i = 1, str_len
+  !       f_str(i:i) = c_chars(i)
+  !     end do
+  !   end if
+  ! end subroutine c_f_string
 
   ! Detect if we're running on macOS
   function is_macos() result(is_mac)

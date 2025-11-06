@@ -79,7 +79,7 @@ contains
 
   ! Create and initialize the treemap drawing area widget
   function create_treemap_widget() result(widget)
-    type(c_ptr) :: widget, motion_controller, click_controller, key_controller
+    type(c_ptr) :: widget, motion_controller, click_controller
 
     ! Initialize renderer
     call init_renderer()
