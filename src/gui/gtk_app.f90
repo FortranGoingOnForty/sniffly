@@ -44,7 +44,6 @@ module gtk_app
   type(c_ptr), save :: breadcrumb_label_ptr = c_null_ptr
   type(c_ptr), save :: progress_bar_ptr = c_null_ptr
   type(c_ptr), save :: path_entry_ptr = c_null_ptr
-  type(c_ptr), save :: search_entry_ptr = c_null_ptr
 
   ! Global scan path (can be set via command line)
   character(len=512), save :: global_scan_path = ""
@@ -177,19 +176,12 @@ contains
     ! Add toolbar to main box
     call gtk_box_append(main_box, toolbar)
 
-    ! Create breadcrumb bar (horizontal box with path label and search entry)
+    ! Create breadcrumb bar (horizontal box with path label)
     breadcrumb_bar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5_c_int)
     breadcrumb_label_ptr = gtk_label_new(""//c_null_char)  ! Will be set by first render
     call gtk_widget_set_halign(breadcrumb_label_ptr, GTK_ALIGN_START)
-    call gtk_widget_set_hexpand(breadcrumb_label_ptr, 1_c_int)  ! Expand to push search to right
+    call gtk_widget_set_hexpand(breadcrumb_label_ptr, 1_c_int)
     call gtk_box_append(breadcrumb_bar, breadcrumb_label_ptr)
-
-    ! Create search/filter entry
-    search_entry_ptr = gtk_entry_new()
-    call gtk_entry_set_placeholder_text(search_entry_ptr, "Filter by filename..."//c_null_char)
-    call g_signal_connect(search_entry_ptr, "changed"//c_null_char, &
-                          c_funloc(on_search_changed), c_null_ptr)
-    call gtk_box_append(breadcrumb_bar, search_entry_ptr)
 
     ! Add breadcrumb bar to main box
     call gtk_box_append(main_box, breadcrumb_bar)
@@ -368,40 +360,6 @@ contains
       print *, "Delete cancelled by user"
     end if
   end subroutine on_delete_clicked
-
-  ! Callback when search/filter entry text changes
-  subroutine on_search_changed(editable, user_data) bind(c)
-    use gtk, only: gtk_widget_queue_draw
-    use treemap_renderer, only: set_filter_pattern, invalidate_layout
-    type(c_ptr), value :: editable, user_data
-    type(c_ptr) :: text_ptr
-    character(len=256) :: search_text
-    integer :: i
-
-    if (.not. c_associated(search_entry_ptr)) return
-
-    ! Get the text from the search entry
-    text_ptr = gtk_editable_get_text(search_entry_ptr)
-
-    ! Convert C string to Fortran string
-    search_text = ""
-    if (c_associated(text_ptr)) then
-      call c_f_string(text_ptr, search_text)
-    end if
-
-    print *, "Search filter changed: '", trim(search_text), "'"
-
-    ! Update filter in renderer
-    call set_filter_pattern(trim(search_text))
-
-    ! Invalidate layout to force recalculation (filtering happens during layout)
-    call invalidate_layout()
-
-    ! Trigger redraw
-    if (c_associated(main_window_ptr)) then
-      call gtk_widget_queue_draw(main_window_ptr)
-    end if
-  end subroutine on_search_changed
 
   ! Helper to convert C string to Fortran string
   subroutine c_f_string(c_str_ptr, f_str)

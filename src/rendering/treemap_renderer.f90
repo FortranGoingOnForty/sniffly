@@ -18,8 +18,7 @@ module treemap_renderer
             scan_and_render_with_interaction, find_node_at_position, navigate_into_node, &
             navigate_up, get_breadcrumb_path, get_path_depth, get_node_count, &
             get_node_center_by_index, find_node_in_direction, register_progress_callback, &
-            scan_directory, invalidate_layout, get_current_view_node, remove_selected_node_from_view, &
-            set_filter_pattern
+            scan_directory, invalidate_layout, get_current_view_node, remove_selected_node_from_view
 
   ! Callback interfaces for progress updates
   abstract interface
@@ -68,9 +67,6 @@ module treemap_renderer
   procedure(show_progress_callback), pointer, save :: show_progress_cb => null()
   procedure(hide_progress_callback), pointer, save :: hide_progress_cb => null()
   procedure(update_progress_callback), pointer, save :: update_progress_cb => null()
-
-  ! Filter pattern for search/filtering
-  character(len=256), save :: filter_pattern = ""
 
 contains
 
@@ -266,9 +262,6 @@ contains
       bounds%height = int(height)
 
       if (associated(current_view_node) .and. current_view_node%size > 0) then
-        ! Apply filter by temporarily setting filtered nodes' sizes to 0
-        call apply_filter_to_view(current_view_node)
-
         call calculate_treemap(current_view_node, bounds)
       end if
 
@@ -323,9 +316,6 @@ contains
       bounds%height = int(height)
 
       if (associated(current_view_node) .and. current_view_node%size > 0) then
-        ! Apply filter by temporarily setting filtered nodes' sizes to 0
-        call apply_filter_to_view(current_view_node)
-
         call calculate_treemap(current_view_node, bounds)
       end if
 
@@ -1020,7 +1010,6 @@ contains
     ! Render only the direct children of the current view
     if (allocated(view_node%children) .and. view_node%num_children > 0) then
       print *, "DEBUG: Rendering", view_node%num_children, "children"
-      print *, "DEBUG: Current filter pattern: '", trim(filter_pattern), "'"
 
       ! Count visible nodes
       visible_count = 0
@@ -1028,7 +1017,7 @@ contains
         ! Skip nodes without names (shouldn't happen but be defensive)
         if (.not. allocated(view_node%children(i)%name)) cycle
 
-        if (view_node%children(i)%size > 0 .and. matches_filter(view_node%children(i)%name)) then
+        if (view_node%children(i)%size > 0) then
           visible_count = visible_count + 1
           if (visible_count <= 5) then
             print *, "DEBUG: Visible child", i, ":", trim(view_node%children(i)%name), &
@@ -1042,12 +1031,7 @@ contains
         ! Skip nodes without names (shouldn't happen but be defensive)
         if (.not. allocated(view_node%children(i)%name)) cycle
 
-        ! Skip nodes that don't match the filter
-        if (.not. matches_filter(view_node%children(i)%name)) then
-          cycle
-        end if
-
-        ! Skip nodes with size 0 (filtered out or deleted)
+        ! Skip nodes with size 0 (deleted)
         if (view_node%children(i)%size == 0) then
           cycle
         end if
@@ -1277,68 +1261,6 @@ contains
     end if
   end subroutine render_label
 
-  ! Set the filter pattern for filename filtering
-  subroutine set_filter_pattern(pattern)
-    character(len=*), intent(in) :: pattern
-
-    filter_pattern = trim(pattern)
-    print *, "Filter pattern set to: '", trim(filter_pattern), "'"
-
-    ! If filter is being cleared, restore all sizes
-    if (len_trim(filter_pattern) == 0 .and. associated(current_view_node)) then
-      print *, "Filter cleared - restoring all sizes"
-      call recalculate_sizes(root_node)
-    end if
-
-    ! Invalidate layout when filter changes
-    layout_calculated = .false.
-  end subroutine set_filter_pattern
-
-  ! Check if a filename matches the current filter pattern (case-insensitive substring match)
-  function matches_filter(filename) result(matches)
-    character(len=*), intent(in) :: filename
-    logical :: matches
-    character(len=256) :: lower_name, lower_pattern
-    integer :: i, ascii_val
-
-    ! If no filter is set, everything matches
-    if (len_trim(filter_pattern) == 0) then
-      matches = .true.
-      return
-    end if
-
-    ! If filename is empty, don't match (defensive check)
-    if (len_trim(filename) == 0) then
-      matches = .false.
-      return
-    end if
-
-    ! Convert both to lowercase for case-insensitive comparison
-    lower_name = ""
-    lower_pattern = ""
-
-    do i = 1, min(len_trim(filename), 256)
-      ascii_val = iachar(filename(i:i))
-      if (ascii_val >= 65 .and. ascii_val <= 90) then  ! A-Z
-        lower_name(i:i) = achar(ascii_val + 32)
-      else
-        lower_name(i:i) = filename(i:i)
-      end if
-    end do
-
-    do i = 1, min(len_trim(filter_pattern), 256)
-      ascii_val = iachar(filter_pattern(i:i))
-      if (ascii_val >= 65 .and. ascii_val <= 90) then  ! A-Z
-        lower_pattern(i:i) = achar(ascii_val + 32)
-      else
-        lower_pattern(i:i) = filter_pattern(i:i)
-      end if
-    end do
-
-    ! Check if pattern is a substring of filename
-    matches = index(trim(lower_name), trim(lower_pattern)) > 0
-  end function matches_filter
-
   ! Recursively recalculate directory sizes from their children
   ! This restores sizes that may have been set to 0 by filtering
   recursive subroutine recalculate_sizes(node)
@@ -1369,36 +1291,5 @@ contains
       node%size = 0_int64
     end if
   end subroutine recalculate_sizes
-
-  ! Apply filter to view by setting non-matching nodes' sizes to 0
-  subroutine apply_filter_to_view(node)
-    type(file_node), intent(inout) :: node
-    integer :: i
-    integer :: match_count
-
-    ! If no filter is set, nothing to do
-    if (len_trim(filter_pattern) == 0) return
-
-    ! If node has no children, nothing to do
-    if (.not. allocated(node%children)) return
-    if (node%num_children == 0) return
-
-    ! First, recalculate all sizes from scratch (restores any previously filtered sizes)
-    call recalculate_sizes(node)
-
-    ! Now apply filter by setting non-matching children to size 0
-    ! Note: original_size is already backed up during scanning, so no need to back up here
-    match_count = 0
-    do i = 1, node%num_children
-      if (matches_filter(node%children(i)%name)) then
-        match_count = match_count + 1
-      else
-        ! Set size to 0 for filtered nodes so layout skips them
-        node%children(i)%size = 0_int64
-      end if
-    end do
-
-    print *, "Filter applied:", match_count, "of", node%num_children, "items match"
-  end subroutine apply_filter_to_view
 
 end module treemap_renderer
