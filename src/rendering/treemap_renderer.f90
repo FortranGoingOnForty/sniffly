@@ -18,7 +18,8 @@ module treemap_renderer
             scan_and_render_with_interaction, find_node_at_position, navigate_into_node, &
             navigate_up, get_breadcrumb_path, get_path_depth, get_node_count, &
             get_node_center_by_index, find_node_in_direction, register_progress_callback, &
-            scan_directory, invalidate_layout, get_current_view_node, remove_selected_node_from_view
+            scan_directory, invalidate_layout, get_current_view_node, remove_selected_node_from_view, &
+            clear_cache, toggle_file_extensions, toggle_age_based_coloring, toggle_size_display_mode
 
   ! Callback interfaces for progress updates
   abstract interface
@@ -56,6 +57,11 @@ module treemap_renderer
   ! Layout cache state
   logical, save :: layout_calculated = .false.
   integer, save :: last_width = 0, last_height = 0
+
+  ! View settings (Phase 5 features)
+  logical, save :: show_file_extensions = .true.     ! Toggle file extensions in labels
+  logical, save :: use_age_based_coloring = .false.  ! Color by file age instead of type
+  logical, save :: show_allocated_size = .false.     ! Show allocated size vs actual size
 
   ! Navigation path stack (for breadcrumbs)
   ! Simple approach: track path as array of names
@@ -865,6 +871,30 @@ contains
     end if
   end function get_file_extension
 
+  ! Strip file extension from a filename (modifies in place)
+  subroutine strip_extension(filename)
+    character(len=*), intent(inout) :: filename
+    integer :: dot_pos, i
+
+    ! Find the last dot in the filename
+    dot_pos = 0
+    do i = len_trim(filename), 1, -1
+      if (filename(i:i) == '.') then
+        dot_pos = i
+        exit
+      end if
+      ! Stop at path separators (no dot in filename)
+      if (filename(i:i) == '/' .or. filename(i:i) == '\') then
+        exit
+      end if
+    end do
+
+    ! If dot found and not at start of filename, strip from dot onward
+    if (dot_pos > 1) then
+      filename(dot_pos:) = ' '  ! Replace with spaces
+    end if
+  end subroutine strip_extension
+
   ! Get color hue based on file type
   function get_file_type_hue(filename) result(hue)
     use iso_fortran_env, only: real64
@@ -1325,6 +1355,59 @@ contains
     print *, "Cached scan for: ", trim(path), " at index ", store_index
   end subroutine cache_store
 
+  ! Clear all cached directory scans
+  subroutine clear_cache()
+    integer :: i
+
+    ! Invalidate all cache entries
+    do i = 1, cache_count
+      dir_cache(i)%valid = .false.
+      dir_cache(i)%path = ""
+    end do
+    cache_count = 0
+    print *, "Directory cache cleared"
+  end subroutine clear_cache
+
+  ! Toggle file extensions in labels
+  subroutine toggle_file_extensions()
+    show_file_extensions = .not. show_file_extensions
+    if (show_file_extensions) then
+      print *, "File extensions enabled"
+    else
+      print *, "File extensions disabled"
+    end if
+    ! Invalidate layout to force redraw
+    call invalidate_layout()
+  end subroutine toggle_file_extensions
+
+  ! Toggle age-based coloring
+  subroutine toggle_age_based_coloring()
+    use_age_based_coloring = .not. use_age_based_coloring
+    if (use_age_based_coloring) then
+      print *, "Age-based coloring enabled"
+    else
+      print *, "File type coloring enabled"
+    end if
+    ! Need to recolor tree and redraw
+    if (has_data) then
+      call color_tree(root_node, 0)
+      call invalidate_layout()
+    end if
+  end subroutine toggle_age_based_coloring
+
+  ! Toggle size display mode (actual vs allocated)
+  subroutine toggle_size_display_mode()
+    show_allocated_size = .not. show_allocated_size
+    if (show_allocated_size) then
+      print *, "Showing allocated size (disk usage)"
+    else
+      print *, "Showing actual size"
+    end if
+    ! For now just a stub - would need to rescan with disk usage info
+    ! Just invalidate layout to force redraw
+    call invalidate_layout()
+  end subroutine toggle_size_display_mode
+
   ! Render text label for a node
   subroutine render_label(cr, node, x, y, w, h)
     use iso_fortran_env, only: int64
@@ -1350,6 +1433,11 @@ contains
     ! Get the file/directory name
     if (allocated(node%name)) then
       name_copy = node%name
+
+      ! Strip extension if show_file_extensions is false and it's a file
+      if (.not. show_file_extensions .and. .not. node%is_directory) then
+        call strip_extension(name_copy)
+      end if
     else
       return  ! No name to display
     end if

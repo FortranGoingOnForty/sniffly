@@ -13,7 +13,7 @@ module gtk_app
                  gtk_label_new, gtk_label_set_text, gtk_widget_set_halign, &
                  GTK_ALIGN_START, gtk_progress_bar_new, gtk_progress_bar_set_fraction, &
                  gtk_progress_bar_set_text, gtk_progress_bar_set_show_text, &
-                 gtk_widget_set_visible, &
+                 gtk_widget_set_visible, gtk_widget_set_sensitive, &
                  gtk_button_new, gtk_button_set_icon_name, &
                  gtk_entry_new, gtk_entry_buffer_set_text, gtk_entry_get_buffer, &
                  gtk_editable_set_editable, gtk_editable_get_text, &
@@ -51,6 +51,17 @@ module gtk_app
 
   ! Scan path for async initial scan
   character(len=512), save :: pending_scan_path = ""
+
+  ! Navigation history for Back/Forward buttons
+  integer, parameter :: MAX_HISTORY = 50
+  character(len=512), dimension(MAX_HISTORY), save :: nav_history
+  integer, save :: nav_history_count = 0
+  integer, save :: nav_history_pos = 0  ! Current position in history (0 = no history)
+  logical, save :: suppress_history_add = .false.  ! Flag to prevent adding to history during Back/Forward
+
+  ! Button pointers for enabling/disabling
+  type(c_ptr), save :: back_btn_ptr = c_null_ptr
+  type(c_ptr), save :: forward_btn_ptr = c_null_ptr
 
 contains
 
@@ -99,7 +110,7 @@ contains
   ! Callback when application activates (startup)
   subroutine on_activate(app, user_data) bind(c)
     type(c_ptr), value :: app, user_data
-    type(c_ptr) :: drawing_area, main_box, toolbar, open_dir_btn, scan_btn, open_finder_btn, copy_path_btn, delete_btn, status_bar, breadcrumb_bar
+    type(c_ptr) :: drawing_area, main_box, toolbar, open_dir_btn, scan_btn, back_btn, forward_btn, up_btn, open_finder_btn, copy_path_btn, info_btn, refresh_btn, delete_btn, status_bar, breadcrumb_bar
     character(len=512) :: scan_path
     integer(c_int) :: idle_id
 
@@ -152,6 +163,32 @@ contains
                            c_funloc(on_scan_clicked), c_null_ptr)
     call gtk_box_append(toolbar, scan_btn)
 
+    ! Create Back button (navigate to previous directory in history)
+    back_btn = gtk_button_new()
+    call gtk_button_set_icon_name(back_btn, "go-previous"//c_null_char)
+    call g_signal_connect(back_btn, "clicked"//c_null_char, &
+                           c_funloc(on_back_clicked), c_null_ptr)
+    call gtk_box_append(toolbar, back_btn)
+    back_btn_ptr = back_btn  ! Store for enabling/disabling
+
+    ! Create Forward button (navigate to next directory in history)
+    forward_btn = gtk_button_new()
+    call gtk_button_set_icon_name(forward_btn, "go-next"//c_null_char)
+    call g_signal_connect(forward_btn, "clicked"//c_null_char, &
+                           c_funloc(on_forward_clicked), c_null_ptr)
+    call gtk_box_append(toolbar, forward_btn)
+    forward_btn_ptr = forward_btn  ! Store for enabling/disabling
+
+    ! Create Up to Parent button (navigate to parent directory)
+    up_btn = gtk_button_new()
+    call gtk_button_set_icon_name(up_btn, "go-up"//c_null_char)
+    call g_signal_connect(up_btn, "clicked"//c_null_char, &
+                           c_funloc(on_up_clicked), c_null_ptr)
+    call gtk_box_append(toolbar, up_btn)
+
+    ! Initialize Back/Forward button states (disabled until history exists)
+    call update_history_buttons()
+
     ! Create progress bar (always visible but starts at 0%)
     ! Place it in toolbar, expanded to fill remaining space (pushes to right)
     progress_bar_ptr = gtk_progress_bar_new()
@@ -174,7 +211,21 @@ contains
                            c_funloc(on_copy_path_clicked), c_null_ptr)
     call gtk_box_append(toolbar, copy_path_btn)
 
-    ! Create Delete button (floated right after Copy Path)
+    ! Create Properties/Info button
+    info_btn = gtk_button_new()
+    call gtk_button_set_icon_name(info_btn, "document-properties"//c_null_char)
+    call g_signal_connect(info_btn, "clicked"//c_null_char, &
+                           c_funloc(on_info_clicked), c_null_ptr)
+    call gtk_box_append(toolbar, info_btn)
+
+    ! Create Refresh/Force Rescan button with circular arrow icon
+    refresh_btn = gtk_button_new()
+    call gtk_button_set_icon_name(refresh_btn, "view-refresh-symbolic"//c_null_char)
+    call g_signal_connect(refresh_btn, "clicked"//c_null_char, &
+                           c_funloc(on_refresh_clicked), c_null_ptr)
+    call gtk_box_append(toolbar, refresh_btn)
+
+    ! Create Delete button (floated right after Refresh)
     delete_btn = gtk_button_new()
     call gtk_button_set_icon_name(delete_btn, "user-trash"//c_null_char)
     call g_signal_connect(delete_btn, "clicked"//c_null_char, &
@@ -381,6 +432,183 @@ contains
     call sniffly_update_status("Path copied to clipboard: " // trim(selected_path))
     print *, "Path copied successfully!"
   end subroutine on_copy_path_clicked
+
+  ! Callback when Properties/Info button is clicked
+  subroutine on_info_clicked(button, user_data) bind(c)
+    use iso_fortran_env, only: int64
+    use treemap_renderer, only: get_current_view_node
+    use treemap_widget, only: get_selected_index
+    use types, only: file_node
+    type(c_ptr), value :: button, user_data
+    character(len=:), allocatable :: info_msg
+    character(len=1024) :: info_text
+    character(len=20) :: size_str
+    type(file_node), pointer :: view_node
+    integer(int64) :: size_bytes
+    integer :: item_count, selected_idx
+
+    ! Check if there's a selection
+    if (.not. has_selection()) then
+      call sniffly_update_status("No selection to show properties for")
+      return
+    end if
+
+    ! Get the selected node
+    view_node => get_current_view_node()
+    if (.not. associated(view_node)) then
+      return
+    end if
+
+    ! Get the selected child index
+    selected_idx = get_selected_index()
+    if (selected_idx < 0 .or. selected_idx >= view_node%num_children) then
+      call sniffly_update_status("Invalid selection")
+      return
+    end if
+
+    ! Get details from selected child (1-indexed in Fortran)
+    size_bytes = view_node%children(selected_idx + 1)%size
+    item_count = view_node%children(selected_idx + 1)%num_children
+
+    ! Format size
+    if (size_bytes < 1024_int64) then
+      write(size_str, '(I0,A)') size_bytes, ' B'
+    else if (size_bytes < 1024_int64**2) then
+      write(size_str, '(F0.2,A)') real(size_bytes)/1024.0, ' KB'
+    else if (size_bytes < 1024_int64**3) then
+      write(size_str, '(F0.2,A)') real(size_bytes)/(1024.0**2), ' MB'
+    else
+      write(size_str, '(F0.2,A)') real(size_bytes)/(1024.0**3), ' GB'
+    end if
+
+    ! Build info text for status bar
+    if (view_node%children(selected_idx + 1)%is_directory) then
+      write(info_text, '(A,A,A,A,A,I0,A)') &
+        trim(view_node%children(selected_idx + 1)%name), ' | ', trim(size_str), ' | ', item_count, ' items'
+    else
+      write(info_text, '(A,A,A,A)') &
+        trim(view_node%children(selected_idx + 1)%name), ' | ', trim(size_str), ' | File'
+    end if
+
+    ! Show properties in status bar
+    info_msg = trim(info_text)
+    call sniffly_update_status(info_msg)
+  end subroutine on_info_clicked
+
+  ! Callback when Refresh/Force Rescan button is clicked
+  subroutine on_refresh_clicked(button, user_data) bind(c)
+    use treemap_renderer, only: clear_cache, invalidate_layout
+    type(c_ptr), value :: button, user_data
+
+    if (len_trim(global_scan_path) == 0) then
+      call sniffly_update_status("No directory to rescan")
+      return
+    end if
+
+    ! Clear the directory cache to force a fresh scan
+    call clear_cache()
+    call invalidate_layout()
+
+    ! Trigger a rescan of the current path
+    call sniffly_update_status("Clearing cache and rescanning...")
+    call trigger_rescan(global_scan_path)
+  end subroutine on_refresh_clicked
+
+  ! Helper: Update Back/Forward button states
+  subroutine update_history_buttons()
+    use gtk, only: gtk_widget_set_sensitive
+
+    if (.not. c_associated(back_btn_ptr) .or. .not. c_associated(forward_btn_ptr)) return
+
+    ! Enable Back if we're not at the start of history
+    if (nav_history_pos > 1) then
+      call gtk_widget_set_sensitive(back_btn_ptr, 1_c_int)
+    else
+      call gtk_widget_set_sensitive(back_btn_ptr, 0_c_int)
+    end if
+
+    ! Enable Forward if we're not at the end of history
+    if (nav_history_pos > 0 .and. nav_history_pos < nav_history_count) then
+      call gtk_widget_set_sensitive(forward_btn_ptr, 1_c_int)
+    else
+      call gtk_widget_set_sensitive(forward_btn_ptr, 0_c_int)
+    end if
+  end subroutine update_history_buttons
+
+  ! Helper: Add path to navigation history
+  subroutine add_to_history(path)
+    character(len=*), intent(in) :: path
+    integer :: i
+
+    ! Don't add if it's the same as current position
+    if (nav_history_pos > 0 .and. nav_history_pos <= nav_history_count) then
+      if (trim(nav_history(nav_history_pos)) == trim(path)) then
+        return
+      end if
+    end if
+
+    ! If we're in the middle of history, discard forward history
+    if (nav_history_pos > 0 .and. nav_history_pos < nav_history_count) then
+      nav_history_count = nav_history_pos
+    end if
+
+    ! Add to history
+    if (nav_history_count < MAX_HISTORY) then
+      nav_history_count = nav_history_count + 1
+      nav_history(nav_history_count) = trim(path)
+    else
+      ! Shift history left and add at end
+      do i = 1, MAX_HISTORY - 1
+        nav_history(i) = nav_history(i + 1)
+      end do
+      nav_history(MAX_HISTORY) = trim(path)
+    end if
+
+    nav_history_pos = nav_history_count
+    call update_history_buttons()
+  end subroutine add_to_history
+
+  ! Callback when Back button is clicked
+  subroutine on_back_clicked(button, user_data) bind(c)
+    type(c_ptr), value :: button, user_data
+
+    if (nav_history_pos > 1) then
+      nav_history_pos = nav_history_pos - 1
+      global_scan_path = trim(nav_history(nav_history_pos))
+      suppress_history_add = .true.  ! Prevent adding to history during Back navigation
+      call set_scan_path(trim(global_scan_path))
+      call update_path_entry(trim(global_scan_path))
+      call trigger_rescan(global_scan_path)
+      call update_history_buttons()
+      call sniffly_update_status("Navigated back to: " // trim(global_scan_path))
+    end if
+  end subroutine on_back_clicked
+
+  ! Callback when Forward button is clicked
+  subroutine on_forward_clicked(button, user_data) bind(c)
+    type(c_ptr), value :: button, user_data
+
+    if (nav_history_pos > 0 .and. nav_history_pos < nav_history_count) then
+      nav_history_pos = nav_history_pos + 1
+      global_scan_path = trim(nav_history(nav_history_pos))
+      suppress_history_add = .true.  ! Prevent adding to history during Forward navigation
+      call set_scan_path(trim(global_scan_path))
+      call update_path_entry(trim(global_scan_path))
+      call trigger_rescan(global_scan_path)
+      call update_history_buttons()
+      call sniffly_update_status("Navigated forward to: " // trim(global_scan_path))
+    end if
+  end subroutine on_forward_clicked
+
+  ! Callback when Up to Parent button is clicked
+  subroutine on_up_clicked(button, user_data) bind(c)
+    use treemap_renderer, only: navigate_up
+    type(c_ptr), value :: button, user_data
+
+    ! Use the existing navigate_up functionality from treemap_renderer
+    call navigate_up()
+    call sniffly_update_status("Navigated to parent directory")
+  end subroutine on_up_clicked
 
   ! Callback when Delete button is clicked
   subroutine on_delete_clicked(button, user_data) bind(c)
@@ -785,8 +1013,20 @@ contains
 
   ! Callback wrapper for navigation events (no arguments)
   subroutine breadcrumb_callback()
+    use treemap_renderer, only: get_breadcrumb_path
+
     call sniffly_update_breadcrumbs()
     call sniffly_update_status_bar_stats()
+
+    ! Add current path to navigation history (unless suppressed by Back/Forward)
+    if (.not. suppress_history_add) then
+      if (len_trim(global_scan_path) > 0) then
+        call add_to_history(global_scan_path)
+      end if
+    end if
+
+    ! Reset suppression flag for next navigation
+    suppress_history_add = .false.
   end subroutine breadcrumb_callback
 
   ! Show progress bar (now just resets to prepare for updates)
