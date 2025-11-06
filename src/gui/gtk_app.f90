@@ -13,17 +13,24 @@ module gtk_app
                  gtk_label_new, gtk_label_set_text, gtk_widget_set_halign, &
                  GTK_ALIGN_START, gtk_progress_bar_new, gtk_progress_bar_set_fraction, &
                  gtk_progress_bar_set_text, gtk_progress_bar_set_show_text, &
-                 gtk_widget_set_visible
+                 gtk_widget_set_visible, gtk_widget_set_sensitive, &
+                 gtk_button_new, gtk_button_set_icon_name, &
+                 gtk_entry_new, gtk_entry_buffer_set_text, gtk_entry_get_buffer, &
+                 gtk_editable_set_editable, gtk_editable_get_text, &
+                 gtk_entry_set_placeholder_text
+  use gdk, only: gdk_display_get_default, gdk_display_get_clipboard, gdk_clipboard_set_text
   use g, only: g_application_run, g_idle_add
   use treemap_widget, only: create_treemap_widget, set_scan_path, register_navigation_callback, &
-                             register_key_handler, register_quit_callback, mark_initial_scan_complete
+                             register_key_handler, register_quit_callback, register_delete_callback, &
+                             mark_initial_scan_complete, has_selection, get_selected_node_path
   use treemap_renderer, only: register_progress_callback, scan_directory
   implicit none
   private
 
   public :: sniffly_app_run, sniffly_app_quit, sniffly_set_scan_path, &
             sniffly_update_status, sniffly_update_breadcrumbs, breadcrumb_callback, &
-            sniffly_update_progress, sniffly_show_progress, sniffly_hide_progress
+            sniffly_update_progress, sniffly_show_progress, sniffly_hide_progress, &
+            sniffly_update_status_bar_stats
 
   ! Application constants
   character(len=*), parameter :: APP_ID = "org.fortrangoingonforty.sniffly"
@@ -37,12 +44,24 @@ module gtk_app
   type(c_ptr), save :: status_label_ptr = c_null_ptr
   type(c_ptr), save :: breadcrumb_label_ptr = c_null_ptr
   type(c_ptr), save :: progress_bar_ptr = c_null_ptr
+  type(c_ptr), save :: path_entry_ptr = c_null_ptr
 
   ! Global scan path (can be set via command line)
   character(len=512), save :: global_scan_path = ""
 
   ! Scan path for async initial scan
   character(len=512), save :: pending_scan_path = ""
+
+  ! Navigation history for Back/Forward buttons
+  integer, parameter :: MAX_HISTORY = 50
+  character(len=512), dimension(MAX_HISTORY), save :: nav_history
+  integer, save :: nav_history_count = 0
+  integer, save :: nav_history_pos = 0  ! Current position in history (0 = no history)
+  logical, save :: suppress_history_add = .false.  ! Flag to prevent adding to history during Back/Forward
+
+  ! Button pointers for enabling/disabling
+  type(c_ptr), save :: back_btn_ptr = c_null_ptr
+  type(c_ptr), save :: forward_btn_ptr = c_null_ptr
 
 contains
 
@@ -91,7 +110,7 @@ contains
   ! Callback when application activates (startup)
   subroutine on_activate(app, user_data) bind(c)
     type(c_ptr), value :: app, user_data
-    type(c_ptr) :: drawing_area, main_box, toolbar, scan_btn, quit_btn, status_bar, breadcrumb_bar
+    type(c_ptr) :: drawing_area, main_box, toolbar, open_dir_btn, scan_btn, back_btn, forward_btn, up_btn, open_finder_btn, copy_path_btn, info_btn, delete_btn, status_bar, breadcrumb_bar
     character(len=512) :: scan_path
     integer(c_int) :: idle_id
 
@@ -124,17 +143,51 @@ contains
     ! Create toolbar (horizontal box)
     toolbar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5_c_int)
 
-    ! Create Scan button
-    scan_btn = gtk_button_new_with_label("Scan"//c_null_char)
+    ! Create Open Directory button with folder icon
+    open_dir_btn = gtk_button_new()
+    call gtk_button_set_icon_name(open_dir_btn, "folder-open"//c_null_char)
+    call g_signal_connect(open_dir_btn, "clicked"//c_null_char, &
+                           c_funloc(on_open_dir_clicked), c_null_ptr)
+    call gtk_box_append(toolbar, open_dir_btn)
+
+    ! Create path display entry (read-only)
+    path_entry_ptr = gtk_entry_new()
+    call gtk_editable_set_editable(path_entry_ptr, 0_c_int)  ! Make read-only
+    call gtk_widget_set_hexpand(path_entry_ptr, 1_c_int)  ! Expand to fill space
+    call gtk_box_append(toolbar, path_entry_ptr)
+
+    ! Create Scan button with refresh icon
+    scan_btn = gtk_button_new()
+    call gtk_button_set_icon_name(scan_btn, "view-refresh"//c_null_char)
     call g_signal_connect(scan_btn, "clicked"//c_null_char, &
                            c_funloc(on_scan_clicked), c_null_ptr)
     call gtk_box_append(toolbar, scan_btn)
 
-    ! Create Quit button
-    quit_btn = gtk_button_new_with_label("Quit"//c_null_char)
-    call g_signal_connect(quit_btn, "clicked"//c_null_char, &
-                           c_funloc(on_quit_clicked), c_null_ptr)
-    call gtk_box_append(toolbar, quit_btn)
+    ! Create Back button (navigate to previous directory in history)
+    back_btn = gtk_button_new()
+    call gtk_button_set_icon_name(back_btn, "go-previous"//c_null_char)
+    call g_signal_connect(back_btn, "clicked"//c_null_char, &
+                           c_funloc(on_back_clicked), c_null_ptr)
+    call gtk_box_append(toolbar, back_btn)
+    back_btn_ptr = back_btn  ! Store for enabling/disabling
+
+    ! Create Forward button (navigate to next directory in history)
+    forward_btn = gtk_button_new()
+    call gtk_button_set_icon_name(forward_btn, "go-next"//c_null_char)
+    call g_signal_connect(forward_btn, "clicked"//c_null_char, &
+                           c_funloc(on_forward_clicked), c_null_ptr)
+    call gtk_box_append(toolbar, forward_btn)
+    forward_btn_ptr = forward_btn  ! Store for enabling/disabling
+
+    ! Create Up to Parent button (navigate to parent directory)
+    up_btn = gtk_button_new()
+    call gtk_button_set_icon_name(up_btn, "go-up"//c_null_char)
+    call g_signal_connect(up_btn, "clicked"//c_null_char, &
+                           c_funloc(on_up_clicked), c_null_ptr)
+    call gtk_box_append(toolbar, up_btn)
+
+    ! Initialize Back/Forward button states (disabled until history exists)
+    call update_history_buttons()
 
     ! Create progress bar (always visible but starts at 0%)
     ! Place it in toolbar, expanded to fill remaining space (pushes to right)
@@ -144,6 +197,34 @@ contains
     call gtk_progress_bar_set_fraction(progress_bar_ptr, 0.0_c_double)  ! Start at 0%
     call gtk_box_append(toolbar, progress_bar_ptr)
 
+    ! Create Open in Finder button (floated right after progress bar)
+    open_finder_btn = gtk_button_new()
+    call gtk_button_set_icon_name(open_finder_btn, "document-open"//c_null_char)
+    call g_signal_connect(open_finder_btn, "clicked"//c_null_char, &
+                           c_funloc(on_open_finder_clicked), c_null_ptr)
+    call gtk_box_append(toolbar, open_finder_btn)
+
+    ! Create Copy Path button
+    copy_path_btn = gtk_button_new()
+    call gtk_button_set_icon_name(copy_path_btn, "edit-copy"//c_null_char)
+    call g_signal_connect(copy_path_btn, "clicked"//c_null_char, &
+                           c_funloc(on_copy_path_clicked), c_null_ptr)
+    call gtk_box_append(toolbar, copy_path_btn)
+
+    ! Create Properties/Info button
+    info_btn = gtk_button_new()
+    call gtk_button_set_icon_name(info_btn, "document-properties"//c_null_char)
+    call g_signal_connect(info_btn, "clicked"//c_null_char, &
+                           c_funloc(on_info_clicked), c_null_ptr)
+    call gtk_box_append(toolbar, info_btn)
+
+    ! Create Delete button
+    delete_btn = gtk_button_new()
+    call gtk_button_set_icon_name(delete_btn, "user-trash"//c_null_char)
+    call g_signal_connect(delete_btn, "clicked"//c_null_char, &
+                           c_funloc(on_delete_clicked), c_null_ptr)
+    call gtk_box_append(toolbar, delete_btn)
+
     ! Add toolbar to main box
     call gtk_box_append(main_box, toolbar)
 
@@ -151,6 +232,7 @@ contains
     breadcrumb_bar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5_c_int)
     breadcrumb_label_ptr = gtk_label_new(""//c_null_char)  ! Will be set by first render
     call gtk_widget_set_halign(breadcrumb_label_ptr, GTK_ALIGN_START)
+    call gtk_widget_set_hexpand(breadcrumb_label_ptr, 1_c_int)
     call gtk_box_append(breadcrumb_bar, breadcrumb_label_ptr)
 
     ! Add breadcrumb bar to main box
@@ -171,11 +253,17 @@ contains
     ! Set the scan path
     call set_scan_path(scan_path)
 
+    ! Update path entry to show initial scan path
+    call update_path_entry(scan_path)
+
     ! Register navigation callback for breadcrumb updates
     call register_navigation_callback(breadcrumb_callback)
 
     ! Register quit callback
     call register_quit_callback(quit_callback_wrapper)
+
+    ! Register delete callback
+    call register_delete_callback(delete_callback_wrapper)
 
     ! Register progress callbacks
     call register_progress_callback(sniffly_show_progress, sniffly_hide_progress, &
@@ -212,18 +300,543 @@ contains
     print *, "Window size: ", DEFAULT_WIDTH, "x", DEFAULT_HEIGHT
   end subroutine on_activate
 
+  ! Callback when Open Directory button is clicked
+  ! NOTE: Uses system command for file picking until GTK4 file dialog bindings are available
+  subroutine on_open_dir_clicked(button, user_data) bind(c)
+    type(c_ptr), value :: button, user_data
+    character(len=1024) :: selected_path
+    integer :: status
+
+    print *, "Open Directory button clicked!"
+
+    ! Call helper to show native file picker
+    call show_native_directory_picker(selected_path, status)
+
+    if (status == 0 .and. len_trim(selected_path) > 0) then
+      print *, "Selected directory: ", trim(selected_path)
+
+      ! Update global scan path (but don't scan yet)
+      ! Remove trailing slash if present (C code doesn't like it)
+      if (len_trim(selected_path) > 1 .and. selected_path(len_trim(selected_path):len_trim(selected_path)) == '/') then
+        global_scan_path = trim(selected_path(1:len_trim(selected_path)-1))
+        print *, "DEBUG: Removed trailing slash from path"
+      else
+        global_scan_path = trim(selected_path)
+      end if
+      print *, "DEBUG: Set global_scan_path to: '", trim(global_scan_path), "'"
+      call set_scan_path(trim(global_scan_path))
+
+      ! Update path display entry
+      call update_path_entry(trim(global_scan_path))
+
+      print *, "Path updated. Click Scan button to scan: ", trim(global_scan_path)
+    else
+      print *, "Directory selection cancelled or failed"
+    end if
+  end subroutine on_open_dir_clicked
+
   ! Callback when Scan button is clicked
   subroutine on_scan_clicked(button, user_data) bind(c)
+    use treemap_renderer, only: clear_cache, invalidate_layout
     type(c_ptr), value :: button, user_data
-    print *, "Scan button clicked! (Directory chooser coming soon...)"
+
+    if (len_trim(global_scan_path) == 0) then
+      call sniffly_update_status("No directory to scan")
+      return
+    end if
+
+    ! Clear the directory cache to force a fresh scan
+    call clear_cache()
+    call invalidate_layout()
+
+    ! Trigger a rescan of the current path
+    call sniffly_update_status("Clearing cache and rescanning...")
+    call trigger_rescan(global_scan_path)
   end subroutine on_scan_clicked
 
-  ! Callback when Quit button is clicked
-  subroutine on_quit_clicked(button, user_data) bind(c)
+  ! Callback when Open in Finder button is clicked
+  subroutine on_open_finder_clicked(button, user_data) bind(c)
     type(c_ptr), value :: button, user_data
-    print *, "Quit button clicked"
-    call sniffly_app_quit()
-  end subroutine on_quit_clicked
+    character(len=:), allocatable :: selected_path
+
+    print *, "Open in Finder button clicked!"
+
+    ! Check if there's a selection
+    if (.not. has_selection()) then
+      print *, "No selection - cannot open in Finder"
+      return
+    end if
+
+    ! Get the selected node path
+    selected_path = get_selected_node_path()
+
+    if (len_trim(selected_path) == 0) then
+      print *, "Invalid selection path"
+      return
+    end if
+
+    print *, "Opening in Finder: ", trim(selected_path)
+    call open_in_file_manager(selected_path)
+  end subroutine on_open_finder_clicked
+
+  ! Callback when Copy Path button is clicked
+  subroutine on_copy_path_clicked(button, user_data) bind(c)
+    type(c_ptr), value :: button, user_data
+    character(len=:), allocatable :: selected_path
+    type(c_ptr) :: display, clipboard
+
+    print *, "Copy Path button clicked!"
+
+    ! Check if there's a selection
+    if (.not. has_selection()) then
+      print *, "No selection - cannot copy path"
+      call sniffly_update_status("No selection to copy")
+      return
+    end if
+
+    ! Get the selected node path
+    selected_path = get_selected_node_path()
+
+    if (len_trim(selected_path) == 0) then
+      print *, "Invalid selection path"
+      call sniffly_update_status("Invalid selection path")
+      return
+    end if
+
+    print *, "Copying path to clipboard: ", trim(selected_path)
+
+    ! Get the default display
+    display = gdk_display_get_default()
+    if (.not. c_associated(display)) then
+      print *, "ERROR: Failed to get default display"
+      call sniffly_update_status("Failed to access clipboard")
+      return
+    end if
+
+    ! Get the clipboard from the display
+    clipboard = gdk_display_get_clipboard(display)
+    if (.not. c_associated(clipboard)) then
+      print *, "ERROR: Failed to get clipboard"
+      call sniffly_update_status("Failed to access clipboard")
+      return
+    end if
+
+    ! Convert Fortran string to C string and set clipboard
+    call gdk_clipboard_set_text(clipboard, trim(selected_path)//c_null_char)
+
+    ! Update status
+    call sniffly_update_status("Path copied to clipboard: " // trim(selected_path))
+    print *, "Path copied successfully!"
+  end subroutine on_copy_path_clicked
+
+  ! Callback when Properties/Info button is clicked
+  subroutine on_info_clicked(button, user_data) bind(c)
+    use iso_fortran_env, only: int64
+    use treemap_renderer, only: get_current_view_node
+    use treemap_widget, only: get_selected_index
+    use types, only: file_node
+    type(c_ptr), value :: button, user_data
+    character(len=:), allocatable :: info_msg
+    character(len=1024) :: info_text
+    character(len=20) :: size_str
+    type(file_node), pointer :: view_node
+    integer(int64) :: size_bytes
+    integer :: item_count, selected_idx
+
+    ! Check if there's a selection
+    if (.not. has_selection()) then
+      call sniffly_update_status("No selection to show properties for")
+      return
+    end if
+
+    ! Get the selected node
+    view_node => get_current_view_node()
+    if (.not. associated(view_node)) then
+      return
+    end if
+
+    ! Get the selected child index
+    selected_idx = get_selected_index()
+    if (selected_idx < 0 .or. selected_idx >= view_node%num_children) then
+      call sniffly_update_status("Invalid selection")
+      return
+    end if
+
+    ! Get details from selected child (1-indexed in Fortran)
+    size_bytes = view_node%children(selected_idx + 1)%size
+    item_count = view_node%children(selected_idx + 1)%num_children
+
+    ! Format size
+    if (size_bytes < 1024_int64) then
+      write(size_str, '(I0,A)') size_bytes, ' B'
+    else if (size_bytes < 1024_int64**2) then
+      write(size_str, '(F0.2,A)') real(size_bytes)/1024.0, ' KB'
+    else if (size_bytes < 1024_int64**3) then
+      write(size_str, '(F0.2,A)') real(size_bytes)/(1024.0**2), ' MB'
+    else
+      write(size_str, '(F0.2,A)') real(size_bytes)/(1024.0**3), ' GB'
+    end if
+
+    ! Build info text for status bar
+    if (view_node%children(selected_idx + 1)%is_directory) then
+      write(info_text, '(A,A,A,A,A,I0,A)') &
+        trim(view_node%children(selected_idx + 1)%name), ' | ', trim(size_str), ' | ', item_count, ' items'
+    else
+      write(info_text, '(A,A,A,A)') &
+        trim(view_node%children(selected_idx + 1)%name), ' | ', trim(size_str), ' | File'
+    end if
+
+    ! Show properties in status bar
+    info_msg = trim(info_text)
+    call sniffly_update_status(info_msg)
+  end subroutine on_info_clicked
+
+  ! Helper: Update Back/Forward button states
+  subroutine update_history_buttons()
+    use gtk, only: gtk_widget_set_sensitive
+
+    if (.not. c_associated(back_btn_ptr) .or. .not. c_associated(forward_btn_ptr)) return
+
+    ! Enable Back if we're not at the start of history
+    if (nav_history_pos > 1) then
+      call gtk_widget_set_sensitive(back_btn_ptr, 1_c_int)
+    else
+      call gtk_widget_set_sensitive(back_btn_ptr, 0_c_int)
+    end if
+
+    ! Enable Forward if we're not at the end of history
+    if (nav_history_pos > 0 .and. nav_history_pos < nav_history_count) then
+      call gtk_widget_set_sensitive(forward_btn_ptr, 1_c_int)
+    else
+      call gtk_widget_set_sensitive(forward_btn_ptr, 0_c_int)
+    end if
+  end subroutine update_history_buttons
+
+  ! Helper: Add path to navigation history
+  subroutine add_to_history(path)
+    character(len=*), intent(in) :: path
+    integer :: i
+
+    ! Don't add if it's the same as current position
+    if (nav_history_pos > 0 .and. nav_history_pos <= nav_history_count) then
+      if (trim(nav_history(nav_history_pos)) == trim(path)) then
+        return
+      end if
+    end if
+
+    ! If we're in the middle of history, discard forward history
+    if (nav_history_pos > 0 .and. nav_history_pos < nav_history_count) then
+      nav_history_count = nav_history_pos
+    end if
+
+    ! Add to history
+    if (nav_history_count < MAX_HISTORY) then
+      nav_history_count = nav_history_count + 1
+      nav_history(nav_history_count) = trim(path)
+    else
+      ! Shift history left and add at end
+      do i = 1, MAX_HISTORY - 1
+        nav_history(i) = nav_history(i + 1)
+      end do
+      nav_history(MAX_HISTORY) = trim(path)
+    end if
+
+    nav_history_pos = nav_history_count
+    call update_history_buttons()
+  end subroutine add_to_history
+
+  ! Callback when Back button is clicked
+  subroutine on_back_clicked(button, user_data) bind(c)
+    type(c_ptr), value :: button, user_data
+
+    if (nav_history_pos > 1) then
+      nav_history_pos = nav_history_pos - 1
+      global_scan_path = trim(nav_history(nav_history_pos))
+      suppress_history_add = .true.  ! Prevent adding to history during Back navigation
+      call set_scan_path(trim(global_scan_path))
+      call update_path_entry(trim(global_scan_path))
+      call trigger_rescan(global_scan_path)
+      call update_history_buttons()
+      call sniffly_update_status("Navigated back to: " // trim(global_scan_path))
+    end if
+  end subroutine on_back_clicked
+
+  ! Callback when Forward button is clicked
+  subroutine on_forward_clicked(button, user_data) bind(c)
+    type(c_ptr), value :: button, user_data
+
+    if (nav_history_pos > 0 .and. nav_history_pos < nav_history_count) then
+      nav_history_pos = nav_history_pos + 1
+      global_scan_path = trim(nav_history(nav_history_pos))
+      suppress_history_add = .true.  ! Prevent adding to history during Forward navigation
+      call set_scan_path(trim(global_scan_path))
+      call update_path_entry(trim(global_scan_path))
+      call trigger_rescan(global_scan_path)
+      call update_history_buttons()
+      call sniffly_update_status("Navigated forward to: " // trim(global_scan_path))
+    end if
+  end subroutine on_forward_clicked
+
+  ! Callback when Up to Parent button is clicked
+  subroutine on_up_clicked(button, user_data) bind(c)
+    use treemap_renderer, only: navigate_up
+    type(c_ptr), value :: button, user_data
+
+    ! Use the existing navigate_up functionality from treemap_renderer
+    call navigate_up()
+    call sniffly_update_status("Navigated to parent directory")
+  end subroutine on_up_clicked
+
+  ! Callback when Delete button is clicked
+  subroutine on_delete_clicked(button, user_data) bind(c)
+    use treemap_widget, only: get_selected_index
+    type(c_ptr), value :: button, user_data
+    character(len=:), allocatable :: selected_path
+    integer :: confirm_result, selected_idx
+
+    print *, "Delete button clicked!"
+
+    ! Check if there's a selection
+    if (.not. has_selection()) then
+      print *, "No selection - cannot delete"
+      return
+    end if
+
+    ! Get the selected node path and index
+    selected_path = get_selected_node_path()
+    selected_idx = get_selected_index()
+
+    if (len_trim(selected_path) == 0) then
+      print *, "Invalid selection path"
+      return
+    end if
+
+    print *, "Preparing to delete: ", trim(selected_path)
+
+    ! Show confirmation dialog
+    call show_delete_confirmation(selected_path, confirm_result)
+
+    if (confirm_result == 1) then
+      print *, "Delete confirmed - proceeding"
+      call delete_to_trash(selected_path, selected_idx)
+    else
+      print *, "Delete cancelled by user"
+    end if
+  end subroutine on_delete_clicked
+
+  ! Commented out unused helper function - was used by removed search/filter feature
+  ! Uncomment if needed in future
+
+  ! ! Helper to convert C string to Fortran string
+  ! subroutine c_f_string(c_str_ptr, f_str)
+  !   type(c_ptr), intent(in) :: c_str_ptr
+  !   character(len=*), intent(out) :: f_str
+  !   character(len=1, kind=c_char), pointer :: c_chars(:)
+  !   integer :: i, str_len
+  !
+  !   f_str = ""
+  !   if (.not. c_associated(c_str_ptr)) return
+  !
+  !   ! Get string length
+  !   str_len = 0
+  !   do i = 1, len(f_str)
+  !     call c_f_pointer(c_str_ptr, c_chars, [i])
+  !     if (c_chars(i) == c_null_char) exit
+  !     str_len = i
+  !   end do
+  !
+  !   ! Copy characters
+  !   if (str_len > 0) then
+  !     call c_f_pointer(c_str_ptr, c_chars, [str_len])
+  !     do i = 1, str_len
+  !       f_str(i:i) = c_chars(i)
+  !     end do
+  !   end if
+  ! end subroutine c_f_string
+
+  ! Detect if we're running on macOS
+  function is_macos() result(is_mac)
+    logical :: is_mac
+    logical :: file_exists
+
+    ! Check for macOS-specific directory
+    inquire(file='/Applications', exist=file_exists)
+    is_mac = file_exists
+  end function is_macos
+
+  ! Show native OS directory picker using system commands
+  ! This is a workaround until GTK4 file dialog bindings are available
+  subroutine show_native_directory_picker(path, status)
+    character(len=*), intent(out) :: path
+    integer, intent(out) :: status
+    character(len=2048) :: command, temp_file
+    integer :: unit, ios
+    logical :: file_exists
+
+    path = ""
+    status = -1
+
+    ! Create temp file for output
+    temp_file = "/tmp/sniffly_picker.txt"
+
+    ! Platform-specific command - detect at runtime
+    if (is_macos()) then
+      ! macOS: Use osascript to show native folder picker
+      command = 'osascript -e ''POSIX path of (choose folder with prompt "Select directory to scan:")'' > ' &
+                // trim(temp_file) // ' 2>&1'
+    else
+      ! Linux: Try zenity, fallback to kdialog
+      command = 'zenity --file-selection --directory > ' // trim(temp_file) // &
+                ' 2>&1 || kdialog --getexistingdirectory . > ' // trim(temp_file) // ' 2>&1'
+    end if
+
+    print *, "Executing: ", trim(command)
+
+    ! Execute command
+    call execute_command_line(trim(command), exitstat=status)
+
+    ! Read result from temp file
+    inquire(file=trim(temp_file), exist=file_exists)
+    if (file_exists) then
+      open(newunit=unit, file=trim(temp_file), status='old', action='read', iostat=ios)
+      if (ios == 0) then
+        read(unit, '(A)', iostat=ios) path
+        close(unit)
+
+        ! Remove temp file
+        call execute_command_line('rm -f ' // trim(temp_file))
+
+        ! Trim whitespace and check if valid
+        path = trim(adjustl(path))
+        if (len_trim(path) > 0) then
+          status = 0
+          print *, "Got path: ", trim(path)
+        else
+          status = 1
+        end if
+      else
+        close(unit)
+        status = 1
+      end if
+    else
+      status = 1
+    end if
+  end subroutine show_native_directory_picker
+
+  ! Update the path display entry with a new path
+  subroutine update_path_entry(path)
+    character(len=*), intent(in) :: path
+    type(c_ptr) :: buffer
+
+    if (.not. c_associated(path_entry_ptr)) return
+
+    ! Get the entry buffer and set the text
+    buffer = gtk_entry_get_buffer(path_entry_ptr)
+    call gtk_entry_buffer_set_text(buffer, trim(path)//c_null_char, &
+                                    int(len_trim(path), c_int))
+  end subroutine update_path_entry
+
+  ! Open a file or folder in the OS file manager (Finder on macOS, file browser on Linux)
+  subroutine open_in_file_manager(path)
+    character(len=*), intent(in) :: path
+    character(len=2048) :: command
+    integer :: status
+
+    if (is_macos()) then
+      ! macOS: Use 'open -R' to reveal in Finder
+      command = 'open -R "' // trim(path) // '"'
+    else
+      ! Linux: Use xdg-open to open in default file manager
+      command = 'xdg-open "' // trim(path) // '"'
+    end if
+
+    print *, "Executing: ", trim(command)
+    call execute_command_line(trim(command), exitstat=status)
+
+    if (status /= 0) then
+      print *, "Warning: Failed to open file manager (exit status: ", status, ")"
+    else
+      print *, "Successfully opened in file manager"
+    end if
+  end subroutine open_in_file_manager
+
+  ! Show native delete confirmation dialog using system commands
+  subroutine show_delete_confirmation(path, result)
+    character(len=*), intent(in) :: path
+    integer, intent(out) :: result
+    character(len=2048) :: command
+    integer :: status
+
+    result = 0  ! Default to cancel
+
+    if (is_macos()) then
+      ! macOS: Use osascript to show native dialog
+      command = 'osascript -e ''display dialog "Are you sure you want to delete:\n' &
+                // trim(path) // '\n\nThis will move the item to Trash." ' &
+                // 'buttons {"Cancel", "Delete"} default button "Cancel" ' &
+                // 'with icon caution'' > /dev/null 2>&1'
+    else
+      ! Linux: Use zenity for confirmation dialog
+      command = 'zenity --question --title="Confirm Delete" --text="Are you sure you want to delete:\n' &
+                // trim(path) // '\n\nThis will move the item to Trash." 2>&1'
+    end if
+
+    print *, "Showing confirmation dialog for: ", trim(path)
+    call execute_command_line(trim(command), exitstat=status)
+
+    ! Both macOS and Linux: exit status 0 means confirmed
+    if (status == 0) then
+      result = 1  ! Confirmed
+    end if
+
+    print *, "Confirmation result: ", result
+  end subroutine show_delete_confirmation
+
+  ! Delete file or folder to system trash (macOS/Linux)
+  subroutine delete_to_trash(path, selected_idx)
+    use gtk, only: gtk_widget_queue_draw
+    use treemap_renderer, only: remove_selected_node_from_view, invalidate_layout
+    use treemap_widget, only: clear_selection
+    character(len=*), intent(in) :: path
+    integer, intent(in) :: selected_idx
+    character(len=2048) :: command
+    integer :: status
+
+    if (is_macos()) then
+      ! macOS: Use osascript to move to Trash via Finder
+      command = 'osascript -e ''tell application "Finder" to delete POSIX file "' &
+                // trim(path) // '"'' > /dev/null 2>&1'
+    else
+      ! Linux: Use gio trash (GNOME), fallback to trash-cli
+      command = 'gio trash "' // trim(path) // '" 2>&1 || trash "' // trim(path) // '" 2>&1'
+    end if
+
+    print *, "Deleting to trash: ", trim(path)
+    call execute_command_line(trim(command), exitstat=status)
+
+    if (status == 0) then
+      print *, "Successfully moved to trash: ", trim(path)
+
+      ! Clear the selection first (before modifying tree)
+      call clear_selection()
+
+      ! Remove the node from the current view by marking it as deleted
+      call remove_selected_node_from_view(selected_idx)
+
+      ! Force layout recalculation
+      call invalidate_layout()
+
+      ! Trigger redraw to show the updated view
+      if (c_associated(main_window_ptr)) then
+        call gtk_widget_queue_draw(main_window_ptr)
+      end if
+
+      print *, "View updated - deleted node removed"
+    else
+      print *, "ERROR: Failed to move to trash (exit status: ", status, ")"
+      print *, "You may need to delete manually or check permissions"
+    end if
+  end subroutine delete_to_trash
 
   ! Update status bar with scan information
   subroutine sniffly_update_status(message)
@@ -232,6 +845,76 @@ contains
       call gtk_label_set_text(status_label_ptr, trim(message)//c_null_char)
     end if
   end subroutine sniffly_update_status
+
+  ! Update status bar with file count and size statistics
+  subroutine sniffly_update_status_bar_stats()
+    use types, only: file_node
+    use treemap_renderer, only: get_current_view_node, get_node_count
+    use iso_fortran_env, only: int64
+    type(file_node), pointer :: current_view
+    integer :: item_count, total_files
+    integer(int64) :: total_size
+    character(len=256) :: status_text
+    character(len=64) :: size_str
+    real :: size_kb, size_mb, size_gb
+
+    if (.not. c_associated(status_label_ptr)) return
+
+    ! Get current view node
+    current_view => get_current_view_node()
+    if (.not. associated(current_view)) then
+      call gtk_label_set_text(status_label_ptr, "No data"//c_null_char)
+      return
+    end if
+
+    ! Get statistics from current view
+    item_count = get_node_count()
+    total_size = current_view%size
+
+    ! Count total files recursively
+    total_files = count_files_recursive(current_view)
+
+    ! Format size nicely
+    if (total_size < 1024_int64) then
+      write(size_str, '(I0,A)') total_size, ' B'
+    else if (total_size < 1024_int64**2) then
+      size_kb = real(total_size) / 1024.0
+      write(size_str, '(F0.2,A)') size_kb, ' KB'
+    else if (total_size < 1024_int64**3) then
+      size_mb = real(total_size) / (1024.0**2)
+      write(size_str, '(F0.2,A)') size_mb, ' MB'
+    else
+      size_gb = real(total_size) / (1024.0**3)
+      write(size_str, '(F0.2,A)') size_gb, ' GB'
+    end if
+
+    ! Build status text
+    write(status_text, '(I0,A,I0,A,A)') item_count, ' items (', total_files, ' files) - ', trim(size_str)
+
+    ! Update status label
+    call gtk_label_set_text(status_label_ptr, trim(status_text)//c_null_char)
+  end subroutine sniffly_update_status_bar_stats
+
+  ! Helper function to recursively count all files in a tree
+  recursive function count_files_recursive(node) result(count)
+    use types, only: file_node
+    type(file_node), intent(in) :: node
+    integer :: count, i
+
+    count = 0
+
+    if (node%is_directory) then
+      ! For directories, count all children recursively
+      if (allocated(node%children)) then
+        do i = 1, node%num_children
+          count = count + count_files_recursive(node%children(i))
+        end do
+      end if
+    else
+      ! For files, count this file
+      count = 1
+    end if
+  end function count_files_recursive
 
   ! Update breadcrumb bar with current path
   subroutine sniffly_update_breadcrumbs()
@@ -250,6 +933,11 @@ contains
     ! Get breadcrumb path from renderer
     call get_breadcrumb_path(names, count)
     print *, "Updating breadcrumbs: count=", count
+    if (count > 0) then
+      print *, "  First path name: '", trim(names(1)), "'"
+    else
+      print *, "  WARNING: count is 0!"
+    end if
 
     ! Get home directory from environment
     call get_environment_variable("HOME", home_dir)
@@ -302,7 +990,20 @@ contains
 
   ! Callback wrapper for navigation events (no arguments)
   subroutine breadcrumb_callback()
+    use treemap_renderer, only: get_breadcrumb_path
+
     call sniffly_update_breadcrumbs()
+    call sniffly_update_status_bar_stats()
+
+    ! Add current path to navigation history (unless suppressed by Back/Forward)
+    if (.not. suppress_history_add) then
+      if (len_trim(global_scan_path) > 0) then
+        call add_to_history(global_scan_path)
+      end if
+    end if
+
+    ! Reset suppression flag for next navigation
+    suppress_history_add = .false.
   end subroutine breadcrumb_callback
 
   ! Show progress bar (now just resets to prepare for updates)
@@ -354,6 +1055,101 @@ contains
     call sniffly_app_quit()
   end subroutine quit_callback_wrapper
 
+  ! Callback wrapper for delete events (no arguments)
+  subroutine delete_callback_wrapper()
+    use treemap_widget, only: get_selected_index
+    character(len=:), allocatable :: selected_path
+    integer :: confirm_result, selected_idx
+
+    print *, "Delete callback triggered from keyboard"
+
+    ! Check if there's a selection
+    if (.not. has_selection()) then
+      print *, "No selection - cannot delete"
+      return
+    end if
+
+    ! Get the selected node path and index
+    selected_path = get_selected_node_path()
+    selected_idx = get_selected_index()
+
+    if (len_trim(selected_path) == 0) then
+      print *, "Invalid selection path"
+      return
+    end if
+
+    print *, "Preparing to delete: ", trim(selected_path)
+
+    ! Show confirmation dialog
+    call show_delete_confirmation(selected_path, confirm_result)
+
+    if (confirm_result == 1) then
+      print *, "Delete confirmed - proceeding"
+      call delete_to_trash(selected_path, selected_idx)
+    else
+      print *, "Delete cancelled by user"
+    end if
+  end subroutine delete_callback_wrapper
+
+  ! Trigger a rescan of the given directory (for UI buttons)
+  subroutine trigger_rescan(path)
+    use gtk, only: gtk_widget_queue_draw
+    use g, only: g_main_context_default, g_main_context_iteration
+    use treemap_renderer, only: invalidate_layout
+    character(len=*), intent(in) :: path
+    character(len=:), allocatable :: normalized_path
+    type(c_ptr) :: context
+    integer :: i
+    integer :: path_len
+
+    print *, "=== TRIGGER_RESCAN ENTERED ==="
+    print *, "Triggering rescan of: '", trim(path), "'"
+    print *, "Path length: ", len_trim(path)
+
+    ! Remove trailing slash if present (C code doesn't like it)
+    path_len = len_trim(path)
+    if (path_len > 1 .and. path(path_len:path_len) == '/') then
+      normalized_path = trim(path(1:path_len-1))
+      print *, "DEBUG: Removed trailing slash. New path: '", normalized_path, "'"
+    else
+      normalized_path = trim(path)
+    end if
+
+    ! Process pending GTK events before starting scan
+    context = g_main_context_default()
+    do i = 1, 10
+      do while (g_main_context_iteration(context, 0_c_int) /= 0_c_int)
+      end do
+    end do
+
+    print *, "=== ABOUT TO CALL scan_directory ==="
+    ! Scan the directory (this will show progress via callbacks)
+    call scan_directory(normalized_path)
+    print *, "=== RETURNED FROM scan_directory ==="
+
+    ! Process events after scan to update UI
+    do i = 1, 10
+      do while (g_main_context_iteration(context, 0_c_int) /= 0_c_int)
+      end do
+    end do
+
+    ! Invalidate layout to force recalculation
+    call invalidate_layout()
+
+    ! Update breadcrumbs after scan
+    call sniffly_update_breadcrumbs()
+
+    ! Update status bar with file statistics
+    call sniffly_update_status_bar_stats()
+
+    ! Trigger redraw to show the scanned data
+    if (c_associated(main_window_ptr)) then
+      call gtk_widget_queue_draw(main_window_ptr)
+    end if
+
+    print *, "=== RESCAN COMPLETE ==="
+  end subroutine trigger_rescan
+
   ! Idle callback for async initial scan
   function perform_initial_scan(user_data) bind(c) result(continue)
     use gtk, only: gtk_widget_queue_draw
@@ -372,6 +1168,9 @@ contains
 
     ! Update breadcrumbs after scan
     call sniffly_update_breadcrumbs()
+
+    ! Update status bar with file statistics
+    call sniffly_update_status_bar_stats()
 
     ! Trigger redraw to show the scanned data
     if (c_associated(main_window_ptr)) then

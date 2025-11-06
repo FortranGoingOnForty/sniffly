@@ -33,6 +33,7 @@ module types
     character(len=:), allocatable :: name
     character(len=:), allocatable :: path
     integer(int64) :: size
+    integer(int64) :: original_size  ! Backup of size before filtering (0 = not backed up yet)
     logical :: is_directory
     logical :: access_denied  ! True if permission denied during scan
 
@@ -56,40 +57,43 @@ module types
 
 contains
 
-  ! Helper function to create RGB color
-  pure function make_rgb(r, g, b) result(color)
-    real(real64), intent(in) :: r, g, b
-    type(rgb_color) :: color
-    color%r = r
-    color%g = g
-    color%b = b
-  end function make_rgb
+  ! Utility functions commented out to avoid unused warnings
+  ! Uncomment if needed in future development
 
-  ! Helper function to create rectangle
-  pure function make_rect(x, y, w, h) result(r)
-    integer, intent(in) :: x, y, w, h
-    type(rect) :: r
-    r%x = x
-    r%y = y
-    r%width = w
-    r%height = h
-  end function make_rect
+  ! ! Helper function to create RGB color
+  ! pure function make_rgb(r, g, b) result(color)
+  !   real(real64), intent(in) :: r, g, b
+  !   type(rgb_color) :: color
+  !   color%r = r
+  !   color%g = g
+  !   color%b = b
+  ! end function make_rgb
 
-  ! Check if a point is inside a rectangle
-  pure function rect_contains(r, px, py) result(inside)
-    type(rect), intent(in) :: r
-    integer, intent(in) :: px, py
-    logical :: inside
+  ! ! Helper function to create rectangle
+  ! pure function make_rect(x, y, w, h) result(r)
+  !   integer, intent(in) :: x, y, w, h
+  !   type(rect) :: r
+  !   r%x = x
+  !   r%y = y
+  !   r%width = w
+  !   r%height = h
+  ! end function make_rect
 
-    inside = (px >= r%x .and. px < r%x + r%width .and. &
-              py >= r%y .and. py < r%y + r%height)
-  end function rect_contains
+  ! ! Check if a point is inside a rectangle
+  ! pure function rect_contains(r, px, py) result(inside)
+  !   type(rect), intent(in) :: r
+  !   integer, intent(in) :: px, py
+  !   logical :: inside
+  !
+  !   inside = (px >= r%x .and. px < r%x + r%width .and. &
+  !             py >= r%y .and. py < r%y + r%height)
+  ! end function rect_contains
 
-  ! Get area of rectangle
-  pure function rect_area(r) result(area)
-    type(rect), intent(in) :: r
-    integer :: area
-    area = r%width * r%height
-  end function rect_area
+  ! ! Get area of rectangle
+  ! pure function rect_area(r) result(area)
+  !   type(rect), intent(in) :: r
+  !   integer :: area
+  !   area = r%width * r%height
+  ! end function rect_area
 
 end module types
