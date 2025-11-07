@@ -19,7 +19,8 @@ module treemap_renderer
             navigate_up, get_breadcrumb_path, get_path_depth, get_node_count, &
             get_node_center_by_index, find_node_in_direction, register_progress_callback, &
             scan_directory, invalidate_layout, get_current_view_node, remove_selected_node_from_view, &
-            clear_cache, toggle_file_extensions, toggle_age_based_coloring, toggle_size_display_mode
+            clear_cache, toggle_file_extensions, toggle_age_based_coloring, toggle_size_display_mode, &
+            toggle_hidden_files, toggle_render_mode
 
   ! Callback interfaces for progress updates
   abstract interface
@@ -62,6 +63,8 @@ module treemap_renderer
   logical, save :: show_file_extensions = .true.     ! Toggle file extensions in labels
   logical, save :: use_age_based_coloring = .false.  ! Color by file age instead of type
   logical, save :: show_allocated_size = .false.     ! Show allocated size vs actual size
+  logical, save :: show_hidden_files = .true.        ! Toggle visibility of dotfiles/hidden files
+  logical, save :: use_cushion_shading = .true.      ! Toggle cushioned (3D) vs flat rendering
 
   ! Navigation path stack (for breadcrumbs)
   ! Simple approach: track path as array of names
@@ -164,7 +167,9 @@ contains
       ! Process events
       do while (g_main_context_iteration(context, 0_c_int) /= 0_c_int)
       end do
-      root_node = dir_cache(cache_index)%node
+      ! Deallocate old root_node before loading from cache
+      call deallocate_tree(root_node)
+      root_node = dir_cache(cache_index)%node  ! Deep copy from cache
     else
       ! Scan the directory tree (recursively gets all files)
       if (associated(update_progress_cb)) call update_progress_cb(0.3_c_double, 'Scanning directories...')
@@ -172,6 +177,8 @@ contains
       do while (g_main_context_iteration(context, 0_c_int) /= 0_c_int)
       end do
 
+      ! Build new tree - Fortran will handle memory reallocation naturally
+      ! Cache entries are shallow copies, so we don't manually deallocate
       call build_tree(expanded_path, root_node)
 
       ! Assign colors to nodes BEFORE caching
@@ -1180,13 +1187,21 @@ contains
     ! Check if we can show a full label
     can_show_label = (w >= 50.0d0 .and. h >= 20.0d0)
 
-    ! Calculate cushion shading
-    shading = calculate_cushion_shading(x, y, w, h, node%cushion)
+    ! Apply cushion shading if enabled, otherwise use flat colors
+    if (use_cushion_shading) then
+      ! Calculate cushion shading
+      shading = calculate_cushion_shading(x, y, w, h, node%cushion)
 
-    ! Apply shading to base color
-    shaded_r = node%color%r * shading
-    shaded_g = node%color%g * shading
-    shaded_b = node%color%b * shading
+      ! Apply shading to base color
+      shaded_r = node%color%r * shading
+      shaded_g = node%color%g * shading
+      shaded_b = node%color%b * shading
+    else
+      ! Flat rendering - use base colors directly
+      shaded_r = node%color%r
+      shaded_g = node%color%g
+      shaded_b = node%color%b
+    end if
 
     ! Fill rectangle with shaded color
     call cairo_set_source_rgb(cr, shaded_r, shaded_g, shaded_b)
@@ -1345,11 +1360,17 @@ contains
       ! Cache full - simple FIFO: overwrite first entry
       print *, "Cache full - evicting oldest entry"
       store_index = 1
+      ! Deallocate old entry before overwriting
+      if (allocated(dir_cache(store_index)%node)) then
+        call deallocate_tree(dir_cache(store_index)%node)
+        deallocate(dir_cache(store_index)%node)
+      end if
     end if
 
-    ! Store in cache
+    ! Store in cache (deep copy via allocatable assignment)
     dir_cache(store_index)%path = trim(path)
-    dir_cache(store_index)%node = node
+    allocate(dir_cache(store_index)%node)
+    dir_cache(store_index)%node = node  ! Deep copy
     dir_cache(store_index)%valid = .true.
 
     print *, "Cached scan for: ", trim(path), " at index ", store_index
@@ -1359,14 +1380,36 @@ contains
   subroutine clear_cache()
     integer :: i
 
-    ! Invalidate all cache entries
+    ! Deallocate cache entries (they are deep copies with own memory)
     do i = 1, cache_count
+      if (allocated(dir_cache(i)%node)) then
+        call deallocate_tree(dir_cache(i)%node)
+        deallocate(dir_cache(i)%node)
+      end if
       dir_cache(i)%valid = .false.
       dir_cache(i)%path = ""
     end do
     cache_count = 0
-    print *, "Directory cache cleared"
+    print *, "Directory cache cleared and deallocated"
   end subroutine clear_cache
+
+  ! Recursively deallocate a file tree
+  recursive subroutine deallocate_tree(node)
+    type(file_node), intent(inout) :: node
+    integer :: i
+
+    ! Deallocate children recursively
+    if (allocated(node%children)) then
+      do i = 1, node%num_children
+        call deallocate_tree(node%children(i))
+      end do
+      deallocate(node%children)
+    end if
+
+    ! Deallocate strings
+    if (allocated(node%name)) deallocate(node%name)
+    if (allocated(node%path)) deallocate(node%path)
+  end subroutine deallocate_tree
 
   ! Toggle file extensions in labels
   subroutine toggle_file_extensions()
@@ -1407,6 +1450,38 @@ contains
     ! Just invalidate layout to force redraw
     call invalidate_layout()
   end subroutine toggle_size_display_mode
+
+  ! Toggle hidden files (dotfiles) visibility
+  subroutine toggle_hidden_files()
+    use disk_scanner, only: set_show_hidden_files
+
+    show_hidden_files = .not. show_hidden_files
+
+    ! Update scanner setting
+    call set_show_hidden_files(show_hidden_files)
+
+    if (show_hidden_files) then
+      print *, "Hidden files (dotfiles) shown - rescan needed"
+    else
+      print *, "Hidden files (dotfiles) hidden - rescan needed"
+    end if
+
+    ! Clear cache to force rescan with new filter
+    call clear_cache()
+    call invalidate_layout()
+  end subroutine toggle_hidden_files
+
+  ! Toggle render mode (flat vs cushioned/3D)
+  subroutine toggle_render_mode()
+    use_cushion_shading = .not. use_cushion_shading
+    if (use_cushion_shading) then
+      print *, "Cushioned (3D) rendering enabled"
+    else
+      print *, "Flat rendering enabled"
+    end if
+    ! Just need to redraw, no rescan needed
+    call invalidate_layout()
+  end subroutine toggle_render_mode
 
   ! Render text label for a node
   subroutine render_label(cr, node, x, y, w, h)
