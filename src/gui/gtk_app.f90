@@ -14,7 +14,7 @@ module gtk_app
                  GTK_ALIGN_START, gtk_progress_bar_new, gtk_progress_bar_set_fraction, &
                  gtk_progress_bar_set_text, gtk_progress_bar_set_show_text, &
                  gtk_widget_set_visible, gtk_widget_set_sensitive, &
-                 gtk_button_new, gtk_button_set_icon_name, &
+                 gtk_button_new, gtk_button_set_icon_name, gtk_widget_set_tooltip_text, &
                  gtk_entry_new, gtk_entry_buffer_set_text, gtk_entry_get_buffer, &
                  gtk_editable_set_editable, gtk_editable_get_text, &
                  gtk_entry_set_placeholder_text
@@ -152,6 +152,7 @@ contains
     ! Create Open Directory button with folder icon
     open_dir_btn = gtk_button_new()
     call gtk_button_set_icon_name(open_dir_btn, "folder-open"//c_null_char)
+    call gtk_widget_set_tooltip_text(open_dir_btn, "Open Directory (Ctrl+O)"//c_null_char)
     call g_signal_connect(open_dir_btn, "clicked"//c_null_char, &
                            c_funloc(on_open_dir_clicked), c_null_ptr)
     call gtk_box_append(toolbar, open_dir_btn)
@@ -160,11 +161,13 @@ contains
     path_entry_ptr = gtk_entry_new()
     call gtk_editable_set_editable(path_entry_ptr, 0_c_int)  ! Make read-only
     call gtk_widget_set_hexpand(path_entry_ptr, 1_c_int)  ! Expand to fill space
+    call gtk_widget_set_tooltip_text(path_entry_ptr, "Current scan path"//c_null_char)
     call gtk_box_append(toolbar, path_entry_ptr)
 
     ! Create Scan button with refresh icon
     scan_btn = gtk_button_new()
     call gtk_button_set_icon_name(scan_btn, "view-refresh"//c_null_char)
+    call gtk_widget_set_tooltip_text(scan_btn, "Rescan Current Directory"//c_null_char)
     call g_signal_connect(scan_btn, "clicked"//c_null_char, &
                            c_funloc(on_scan_clicked), c_null_ptr)
     call gtk_box_append(toolbar, scan_btn)
@@ -172,6 +175,7 @@ contains
     ! Create Back button (navigate to previous directory in history)
     back_btn = gtk_button_new()
     call gtk_button_set_icon_name(back_btn, "go-previous"//c_null_char)
+    call gtk_widget_set_tooltip_text(back_btn, "Navigate Back"//c_null_char)
     call g_signal_connect(back_btn, "clicked"//c_null_char, &
                            c_funloc(on_back_clicked), c_null_ptr)
     call gtk_box_append(toolbar, back_btn)
@@ -180,6 +184,7 @@ contains
     ! Create Forward button (navigate to next directory in history)
     forward_btn = gtk_button_new()
     call gtk_button_set_icon_name(forward_btn, "go-next"//c_null_char)
+    call gtk_widget_set_tooltip_text(forward_btn, "Navigate Forward"//c_null_char)
     call g_signal_connect(forward_btn, "clicked"//c_null_char, &
                            c_funloc(on_forward_clicked), c_null_ptr)
     call gtk_box_append(toolbar, forward_btn)
@@ -188,6 +193,7 @@ contains
     ! Create Up to Parent button (navigate to parent directory)
     up_btn = gtk_button_new()
     call gtk_button_set_icon_name(up_btn, "go-up"//c_null_char)
+    call gtk_widget_set_tooltip_text(up_btn, "Navigate to Parent Directory (Backspace)"//c_null_char)
     call g_signal_connect(up_btn, "clicked"//c_null_char, &
                            c_funloc(on_up_clicked), c_null_ptr)
     call gtk_box_append(toolbar, up_btn)
@@ -206,6 +212,7 @@ contains
     ! Create Open in Finder button (floated right after progress bar)
     open_finder_btn = gtk_button_new()
     call gtk_button_set_icon_name(open_finder_btn, "document-open"//c_null_char)
+    call gtk_widget_set_tooltip_text(open_finder_btn, "Open in Finder/File Manager"//c_null_char)
     call g_signal_connect(open_finder_btn, "clicked"//c_null_char, &
                            c_funloc(on_open_finder_clicked), c_null_ptr)
     call gtk_box_append(toolbar, open_finder_btn)
@@ -213,6 +220,7 @@ contains
     ! Create Copy Path button
     copy_path_btn = gtk_button_new()
     call gtk_button_set_icon_name(copy_path_btn, "edit-copy"//c_null_char)
+    call gtk_widget_set_tooltip_text(copy_path_btn, "Copy Path to Clipboard"//c_null_char)
     call g_signal_connect(copy_path_btn, "clicked"//c_null_char, &
                            c_funloc(on_copy_path_clicked), c_null_ptr)
     call gtk_box_append(toolbar, copy_path_btn)
@@ -220,6 +228,7 @@ contains
     ! Create Properties/Info button
     info_btn = gtk_button_new()
     call gtk_button_set_icon_name(info_btn, "document-properties"//c_null_char)
+    call gtk_widget_set_tooltip_text(info_btn, "Show Properties/Info"//c_null_char)
     call g_signal_connect(info_btn, "clicked"//c_null_char, &
                            c_funloc(on_info_clicked), c_null_ptr)
     call gtk_box_append(toolbar, info_btn)
@@ -229,6 +238,7 @@ contains
     ! Toggle Dotfiles button
     toggle_dotfiles_btn = gtk_button_new()
     call gtk_button_set_icon_name(toggle_dotfiles_btn, "view-reveal-symbolic"//c_null_char)
+    call gtk_widget_set_tooltip_text(toggle_dotfiles_btn, "Toggle Hidden Files/Dotfiles"//c_null_char)
     call g_signal_connect(toggle_dotfiles_btn, "clicked"//c_null_char, &
                            c_funloc(on_toggle_dotfiles_clicked), c_null_ptr)
     call gtk_box_append(toolbar, toggle_dotfiles_btn)
@@ -236,6 +246,7 @@ contains
     ! Toggle File Extensions button
     toggle_ext_btn = gtk_button_new()
     call gtk_button_set_icon_name(toggle_ext_btn, "text-x-generic-symbolic"//c_null_char)
+    call gtk_widget_set_tooltip_text(toggle_ext_btn, "Toggle File Extensions in Labels"//c_null_char)
     call g_signal_connect(toggle_ext_btn, "clicked"//c_null_char, &
                            c_funloc(on_toggle_extensions_clicked), c_null_ptr)
     call gtk_box_append(toolbar, toggle_ext_btn)
@@ -243,6 +254,7 @@ contains
     ! Toggle Render Mode button (Flat vs Cushioned)
     toggle_render_btn = gtk_button_new()
     call gtk_button_set_icon_name(toggle_render_btn, "view-grid-symbolic"//c_null_char)
+    call gtk_widget_set_tooltip_text(toggle_render_btn, "Toggle Flat/3D Rendering Mode"//c_null_char)
     call g_signal_connect(toggle_render_btn, "clicked"//c_null_char, &
                            c_funloc(on_toggle_render_mode_clicked), c_null_ptr)
     call gtk_box_append(toolbar, toggle_render_btn)
@@ -250,6 +262,7 @@ contains
     ! Create Delete button
     delete_btn = gtk_button_new()
     call gtk_button_set_icon_name(delete_btn, "user-trash"//c_null_char)
+    call gtk_widget_set_tooltip_text(delete_btn, "Delete to Trash (D key)"//c_null_char)
     call g_signal_connect(delete_btn, "clicked"//c_null_char, &
                            c_funloc(on_delete_clicked), c_null_ptr)
     call gtk_box_append(toolbar, delete_btn)
