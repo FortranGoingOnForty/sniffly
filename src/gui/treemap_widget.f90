@@ -15,8 +15,8 @@ module treemap_widget
 
   public :: create_treemap_widget, set_scan_path, get_widget_ptr, register_navigation_callback, &
             register_key_handler, register_quit_callback, register_delete_callback, &
-            mark_initial_scan_complete, get_selected_node_path, has_selection, get_selected_index, &
-            clear_selection
+            register_refresh_callback, mark_initial_scan_complete, get_selected_node_path, &
+            has_selection, get_selected_index, clear_selection
 
   ! Callback interface for navigation events
   abstract interface
@@ -36,6 +36,12 @@ module treemap_widget
     end subroutine delete_callback
   end interface
 
+  ! Callback interface for force refresh events
+  abstract interface
+    subroutine refresh_callback()
+    end subroutine refresh_callback
+  end interface
+
   ! GDK Key constants
   integer(c_int), parameter :: GDK_KEY_Return = 65293_c_int      ! Enter key
   integer(c_int), parameter :: GDK_KEY_BackSpace = 65288_c_int   ! Backspace key
@@ -47,6 +53,12 @@ module treemap_widget
   integer(c_int), parameter :: GDK_KEY_period = 46_c_int         ! Period key
   integer(c_int), parameter :: GDK_KEY_q = 113_c_int             ! q key
   integer(c_int), parameter :: GDK_KEY_d = 100_c_int             ! d key
+  integer(c_int), parameter :: GDK_KEY_r = 114_c_int             ! r key
+
+  ! GDK Modifier masks
+  integer(c_int), parameter :: GDK_SHIFT_MASK = 1_c_int          ! Shift key
+  integer(c_int), parameter :: GDK_CONTROL_MASK = 4_c_int        ! Control key
+  integer(c_int), parameter :: GDK_META_MASK = 268435456_c_int   ! Cmd key (macOS)
 
   ! Widget state (will expand later)
   type(c_ptr), save :: widget_ptr = c_null_ptr
@@ -74,6 +86,9 @@ module treemap_widget
 
   ! Delete callback (called when user wants to delete)
   procedure(delete_callback), pointer, save :: delete_cb => null()
+
+  ! Force refresh callback (called when user wants to force refresh with cache clear)
+  procedure(refresh_callback), pointer, save :: refresh_cb => null()
 
 contains
 
@@ -173,6 +188,13 @@ contains
     delete_cb => callback
     print *, "Delete callback registered"
   end subroutine register_delete_callback
+
+  ! Register a callback to be called when user wants to force refresh
+  subroutine register_refresh_callback(callback)
+    procedure(refresh_callback) :: callback
+    refresh_cb => callback
+    print *, "Force refresh callback registered"
+  end subroutine register_refresh_callback
 
   ! Mark that the initial scan has completed
   subroutine mark_initial_scan_complete()
@@ -432,6 +454,20 @@ contains
         call delete_cb()
       end if
       handled = 1_c_int
+
+    ! Cmd+Shift+R / Ctrl+Shift+R: Force refresh (clear cache and rescan)
+    else if (keyval == GDK_KEY_r) then
+      ! Check for Shift modifier
+      if (iand(state, GDK_SHIFT_MASK) /= 0) then
+        ! Check for Control (Linux/Windows) or Meta/Cmd (macOS)
+        if (iand(state, GDK_CONTROL_MASK) /= 0 .or. iand(state, GDK_META_MASK) /= 0) then
+          print *, "Cmd+Shift+R / Ctrl+Shift+R pressed - force refresh with cache clear"
+          if (associated(refresh_cb)) then
+            call refresh_cb()
+          end if
+          handled = 1_c_int
+        end if
+      end if
     end if
 
   end function on_key_press

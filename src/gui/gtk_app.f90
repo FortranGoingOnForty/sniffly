@@ -7,9 +7,9 @@ module gtk_app
                  gtk_window_present, G_APPLICATION_DEFAULT_FLAGS, &
                  gtk_application_get_active_window, gtk_window_destroy, &
                  gtk_window_set_child, g_signal_connect, &
-                 gtk_box_new, gtk_box_append, GTK_ORIENTATION_VERTICAL, &
+                 gtk_box_new, gtk_box_append, gtk_box_remove, GTK_ORIENTATION_VERTICAL, &
                  GTK_ORIENTATION_HORIZONTAL, gtk_button_new_with_label, &
-                 gtk_widget_set_hexpand, gtk_widget_set_vexpand, &
+                 gtk_widget_set_hexpand, gtk_widget_set_vexpand, gtk_widget_get_first_child, &
                  gtk_label_new, gtk_label_set_text, gtk_widget_set_halign, &
                  GTK_ALIGN_START, gtk_progress_bar_new, gtk_progress_bar_set_fraction, &
                  gtk_progress_bar_set_text, gtk_progress_bar_set_show_text, &
@@ -22,7 +22,8 @@ module gtk_app
   use g, only: g_application_run, g_idle_add
   use treemap_widget, only: create_treemap_widget, set_scan_path, register_navigation_callback, &
                              register_key_handler, register_quit_callback, register_delete_callback, &
-                             mark_initial_scan_complete, has_selection, get_selected_node_path
+                             register_refresh_callback, mark_initial_scan_complete, has_selection, &
+                             get_selected_node_path
   use treemap_renderer, only: register_progress_callback, scan_directory
   implicit none
   private
@@ -42,9 +43,14 @@ module gtk_app
   type(c_ptr), save :: app_ptr = c_null_ptr
   type(c_ptr), save :: main_window_ptr = c_null_ptr
   type(c_ptr), save :: status_label_ptr = c_null_ptr
-  type(c_ptr), save :: breadcrumb_label_ptr = c_null_ptr
+  type(c_ptr), save :: breadcrumb_box_ptr = c_null_ptr  ! Container for breadcrumb buttons
   type(c_ptr), save :: progress_bar_ptr = c_null_ptr
   type(c_ptr), save :: path_entry_ptr = c_null_ptr
+
+  ! Breadcrumb button storage (max 50 path segments)
+  integer, parameter :: MAX_BREADCRUMB_SEGMENTS = 50
+  type(c_ptr), dimension(MAX_BREADCRUMB_SEGMENTS), save :: breadcrumb_buttons = c_null_ptr
+  integer, save :: breadcrumb_count = 0
 
   ! Global scan path (can be set via command line)
   character(len=512), save :: global_scan_path = ""
@@ -110,7 +116,7 @@ contains
   ! Callback when application activates (startup)
   subroutine on_activate(app, user_data) bind(c)
     type(c_ptr), value :: app, user_data
-    type(c_ptr) :: drawing_area, main_box, toolbar, open_dir_btn, scan_btn, back_btn, forward_btn, up_btn, open_finder_btn, copy_path_btn, info_btn, delete_btn, status_bar, breadcrumb_bar
+    type(c_ptr) :: drawing_area, main_box, toolbar, open_dir_btn, scan_btn, back_btn, forward_btn, up_btn, open_finder_btn, copy_path_btn, info_btn, toggle_dotfiles_btn, toggle_ext_btn, toggle_render_btn, delete_btn, status_bar, breadcrumb_bar
     character(len=512) :: scan_path
     integer(c_int) :: idle_id
 
@@ -218,6 +224,29 @@ contains
                            c_funloc(on_info_clicked), c_null_ptr)
     call gtk_box_append(toolbar, info_btn)
 
+    ! View Toggle Buttons (Phase 3 & 5 features)
+
+    ! Toggle Dotfiles button
+    toggle_dotfiles_btn = gtk_button_new()
+    call gtk_button_set_icon_name(toggle_dotfiles_btn, "view-reveal-symbolic"//c_null_char)
+    call g_signal_connect(toggle_dotfiles_btn, "clicked"//c_null_char, &
+                           c_funloc(on_toggle_dotfiles_clicked), c_null_ptr)
+    call gtk_box_append(toolbar, toggle_dotfiles_btn)
+
+    ! Toggle File Extensions button
+    toggle_ext_btn = gtk_button_new()
+    call gtk_button_set_icon_name(toggle_ext_btn, "text-x-generic-symbolic"//c_null_char)
+    call g_signal_connect(toggle_ext_btn, "clicked"//c_null_char, &
+                           c_funloc(on_toggle_extensions_clicked), c_null_ptr)
+    call gtk_box_append(toolbar, toggle_ext_btn)
+
+    ! Toggle Render Mode button (Flat vs Cushioned)
+    toggle_render_btn = gtk_button_new()
+    call gtk_button_set_icon_name(toggle_render_btn, "view-grid-symbolic"//c_null_char)
+    call g_signal_connect(toggle_render_btn, "clicked"//c_null_char, &
+                           c_funloc(on_toggle_render_mode_clicked), c_null_ptr)
+    call gtk_box_append(toolbar, toggle_render_btn)
+
     ! Create Delete button
     delete_btn = gtk_button_new()
     call gtk_button_set_icon_name(delete_btn, "user-trash"//c_null_char)
@@ -228,12 +257,12 @@ contains
     ! Add toolbar to main box
     call gtk_box_append(main_box, toolbar)
 
-    ! Create breadcrumb bar (horizontal box with path label)
-    breadcrumb_bar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5_c_int)
-    breadcrumb_label_ptr = gtk_label_new(""//c_null_char)  ! Will be set by first render
-    call gtk_widget_set_halign(breadcrumb_label_ptr, GTK_ALIGN_START)
-    call gtk_widget_set_hexpand(breadcrumb_label_ptr, 1_c_int)
-    call gtk_box_append(breadcrumb_bar, breadcrumb_label_ptr)
+    ! Create breadcrumb bar (horizontal box for clickable path segments)
+    breadcrumb_bar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0_c_int)  ! No spacing, buttons touch
+    call gtk_widget_set_halign(breadcrumb_bar, GTK_ALIGN_START)
+
+    ! Store the box pointer for dynamic button updates
+    breadcrumb_box_ptr = breadcrumb_bar
 
     ! Add breadcrumb bar to main box
     call gtk_box_append(main_box, breadcrumb_bar)
@@ -264,6 +293,9 @@ contains
 
     ! Register delete callback
     call register_delete_callback(delete_callback_wrapper)
+
+    ! Register force refresh callback
+    call register_refresh_callback(refresh_callback_wrapper)
 
     ! Register progress callbacks
     call register_progress_callback(sniffly_show_progress, sniffly_hide_progress, &
@@ -337,7 +369,6 @@ contains
 
   ! Callback when Scan button is clicked
   subroutine on_scan_clicked(button, user_data) bind(c)
-    use treemap_renderer, only: clear_cache, invalidate_layout
     type(c_ptr), value :: button, user_data
 
     if (len_trim(global_scan_path) == 0) then
@@ -345,12 +376,8 @@ contains
       return
     end if
 
-    ! Clear the directory cache to force a fresh scan
-    call clear_cache()
-    call invalidate_layout()
-
-    ! Trigger a rescan of the current path
-    call sniffly_update_status("Clearing cache and rescanning...")
+    ! Trigger a rescan of the current path (uses cache for speed)
+    call sniffly_update_status("Rescanning...")
     call trigger_rescan(global_scan_path)
   end subroutine on_scan_clicked
 
@@ -623,6 +650,38 @@ contains
       print *, "Delete cancelled by user"
     end if
   end subroutine on_delete_clicked
+
+  ! Callback when Toggle Dotfiles button is clicked
+  subroutine on_toggle_dotfiles_clicked(button, user_data) bind(c)
+    use treemap_renderer, only: toggle_hidden_files
+    type(c_ptr), value :: button, user_data
+
+    call toggle_hidden_files()
+    call sniffly_update_status("Toggled hidden files visibility - rescanning...")
+
+    ! Trigger rescan to apply the filter
+    if (len_trim(global_scan_path) > 0) then
+      call trigger_rescan(global_scan_path)
+    end if
+  end subroutine on_toggle_dotfiles_clicked
+
+  ! Callback when Toggle File Extensions button is clicked
+  subroutine on_toggle_extensions_clicked(button, user_data) bind(c)
+    use treemap_renderer, only: toggle_file_extensions
+    type(c_ptr), value :: button, user_data
+
+    call toggle_file_extensions()
+    call sniffly_update_status("Toggled file extensions visibility")
+  end subroutine on_toggle_extensions_clicked
+
+  ! Callback when Toggle Render Mode button is clicked
+  subroutine on_toggle_render_mode_clicked(button, user_data) bind(c)
+    use treemap_renderer, only: toggle_render_mode
+    type(c_ptr), value :: button, user_data
+
+    call toggle_render_mode()
+    call sniffly_update_status("Toggled render mode (flat vs cushioned)")
+  end subroutine on_toggle_render_mode_clicked
 
   ! Commented out unused helper function - was used by removed search/filter feature
   ! Uncomment if needed in future
@@ -916,46 +975,53 @@ contains
     end if
   end function count_files_recursive
 
-  ! Update breadcrumb bar with current path
+  ! Update breadcrumb bar with clickable path segments
   subroutine sniffly_update_breadcrumbs()
     use treemap_renderer, only: get_breadcrumb_path, get_path_depth
+    use gtk, only: gtk_button_new_with_label, gtk_box_remove
     character(len=256), dimension(100) :: names
-    character(len=2048) :: path_str
-    character(len=512) :: home_dir
-    integer :: count, i, home_len, name_len
+    character(len=512) :: home_dir, segment_label
+    character(len=256) :: display_name
+    integer :: count, i, home_len, name_len, depth_to_navigate
     logical :: is_home_path
+    type(c_ptr) :: button, separator, child
+    type(c_ptr) :: user_data_ptr
 
-    if (.not. c_associated(breadcrumb_label_ptr)) then
-      print *, "WARNING: breadcrumb_label_ptr not associated!"
+    if (.not. c_associated(breadcrumb_box_ptr)) then
+      print *, "WARNING: breadcrumb_box_ptr not associated!"
       return
     end if
 
     ! Get breadcrumb path from renderer
     call get_breadcrumb_path(names, count)
     print *, "Updating breadcrumbs: count=", count
-    if (count > 0) then
-      print *, "  First path name: '", trim(names(1)), "'"
-    else
-      print *, "  WARNING: count is 0!"
-    end if
 
-    ! Get home directory from environment
+    ! Remove all existing breadcrumb widgets
+    do i = 1, breadcrumb_count
+      if (c_associated(breadcrumb_buttons(i))) then
+        child = gtk_widget_get_first_child(breadcrumb_box_ptr)
+        do while (c_associated(child))
+          call gtk_box_remove(breadcrumb_box_ptr, child)
+          child = gtk_widget_get_first_child(breadcrumb_box_ptr)
+        end do
+        exit
+      end if
+    end do
+    breadcrumb_count = 0
+
+    ! Get home directory for abbreviation
     call get_environment_variable("HOME", home_dir)
     home_len = len_trim(home_dir)
 
-    ! Build path string with "/" separators
-    path_str = ""
-    do i = 1, count
-      if (i > 1) then
-        path_str = trim(path_str) // "/"
-      end if
+    ! Create button for each path segment
+    do i = 1, min(count, MAX_BREADCRUMB_SEGMENTS)
+      display_name = names(i)
 
-      ! Check if this is the first element and starts with home directory
+      ! Replace home directory with ~ for first segment
       if (i == 1 .and. home_len > 0) then
         name_len = len_trim(names(i))
         is_home_path = .false.
 
-        ! Check if path starts with home directory
         if (name_len >= home_len) then
           if (names(i)(1:home_len) == home_dir(1:home_len)) then
             is_home_path = .true.
@@ -963,30 +1029,86 @@ contains
         end if
 
         if (is_home_path) then
-          ! Replace home directory with ~
           if (name_len == home_len) then
-            ! Exactly the home directory
-            path_str = trim(path_str) // "~"
+            display_name = "~"
           else if (names(i)(home_len+1:home_len+1) == "/") then
-            ! Home directory with subdirectory
-            path_str = trim(path_str) // "~" // trim(names(i)(home_len+1:name_len))
-          else
-            ! Path contains home but isn't a direct child
-            path_str = trim(path_str) // trim(names(i))
+            display_name = "~" // trim(names(i)(home_len+1:name_len))
           end if
-        else
-          path_str = trim(path_str) // trim(names(i))
         end if
-      else
-        path_str = trim(path_str) // trim(names(i))
       end if
+
+      ! Extract just the last component for nested paths
+      if (i > 1) then
+        ! Find last slash and take component after it
+        name_len = len_trim(names(i))
+        do depth_to_navigate = name_len, 1, -1
+          if (names(i)(depth_to_navigate:depth_to_navigate) == '/') then
+            display_name = names(i)(depth_to_navigate+1:name_len)
+            exit
+          end if
+        end do
+      end if
+
+      ! Add separator before button (except first)
+      if (i > 1) then
+        separator = gtk_label_new(" > "//c_null_char)
+        call gtk_box_append(breadcrumb_box_ptr, separator)
+      end if
+
+      ! Create clickable button for this segment
+      segment_label = trim(display_name)
+      button = gtk_button_new_with_label(trim(segment_label)//c_null_char)
+
+      ! Store depth information as user data (count - i = levels to go up)
+      depth_to_navigate = count - i
+      user_data_ptr = transfer(depth_to_navigate, user_data_ptr)
+
+      ! Connect click handler
+      call g_signal_connect(button, "clicked"//c_null_char, &
+                           c_funloc(on_breadcrumb_clicked), user_data_ptr)
+
+      ! Add to box
+      call gtk_box_append(breadcrumb_box_ptr, button)
+
+      ! Store button reference
+      breadcrumb_count = breadcrumb_count + 1
+      breadcrumb_buttons(breadcrumb_count) = button
     end do
 
-    print *, "Breadcrumb path: ", trim(path_str)
-
-    ! Update label
-    call gtk_label_set_text(breadcrumb_label_ptr, trim(path_str)//c_null_char)
+    print *, "Created ", breadcrumb_count, " clickable breadcrumb segments"
   end subroutine sniffly_update_breadcrumbs
+
+  ! Breadcrumb button click handler
+  subroutine on_breadcrumb_clicked(button, user_data) bind(c)
+    use treemap_renderer, only: navigate_up
+    use gtk, only: gtk_widget_queue_draw
+    use treemap_widget, only: get_widget_ptr
+    type(c_ptr), value :: button, user_data
+    integer :: levels_to_go_up
+    type(c_ptr) :: widget
+
+    ! Extract depth from user data
+    levels_to_go_up = transfer(user_data, levels_to_go_up)
+
+    print *, "Breadcrumb clicked: navigating up ", levels_to_go_up, " levels"
+
+    if (levels_to_go_up > 0) then
+      ! Navigate up by the specified number of levels
+      call navigate_up(levels_to_go_up)
+
+      ! Update UI
+      call sniffly_update_breadcrumbs()
+      call sniffly_update_status_bar_stats()
+
+      ! Redraw treemap
+      widget = get_widget_ptr()
+      if (c_associated(widget)) then
+        call gtk_widget_queue_draw(widget)
+      end if
+    else
+      print *, "Already at this level (depth = 0)"
+    end if
+  end subroutine on_breadcrumb_clicked
 
   ! Callback wrapper for navigation events (no arguments)
   subroutine breadcrumb_callback()
@@ -1090,6 +1212,27 @@ contains
       print *, "Delete cancelled by user"
     end if
   end subroutine delete_callback_wrapper
+
+  ! Callback wrapper for force refresh events (clear cache and rescan)
+  subroutine refresh_callback_wrapper()
+    use treemap_renderer, only: clear_cache, invalidate_layout
+
+    print *, "Force refresh triggered from keyboard shortcut"
+
+    ! Clear the directory cache
+    call clear_cache()
+    call invalidate_layout()
+
+    ! Update status
+    call sniffly_update_status("Clearing cache and rescanning...")
+
+    ! Trigger rescan if we have a path
+    if (len_trim(global_scan_path) > 0) then
+      call trigger_rescan(global_scan_path)
+    else
+      call sniffly_update_status("No directory to scan")
+    end if
+  end subroutine refresh_callback_wrapper
 
   ! Trigger a rescan of the given directory (for UI buttons)
   subroutine trigger_rescan(path)

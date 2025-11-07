@@ -7,11 +7,15 @@ module disk_scanner
   implicit none
   private
 
-  public :: scan_directory, build_tree, calculate_sizes, dump_tree_debug, set_progress_callback
+  public :: scan_directory, build_tree, calculate_sizes, dump_tree_debug, set_progress_callback, &
+             set_show_hidden_files
 
   ! Directories to skip (reduce scan time and avoid issues)
   character(len=*), parameter, dimension(7) :: SKIP_DIRS = &
     [character(len=20) :: '.git', '.svn', '.hg', 'node_modules', '__pycache__', 'build', '.claude']
+
+  ! Hidden files visibility setting
+  logical, save :: show_hidden_files = .true.
 
   ! Small file grouping thresholds
   real, parameter :: SMALL_FILE_THRESHOLD = 0.005  ! 0.5% of parent size
@@ -137,7 +141,7 @@ contains
     end do
 
     ! Replace old children array with new one
-    if (allocated(node%children)) deallocate(node%children)
+    ! Note: move_alloc automatically deallocates node%children if allocated
     call move_alloc(new_children, node%children)
     node%num_children = large_count + 1
 
@@ -164,6 +168,24 @@ contains
     to%is_selected = from%is_selected
     to%is_hovered = from%is_hovered
   end subroutine move_file_node
+
+  ! Recursively deallocate a file tree node
+  recursive subroutine deallocate_child_tree(node)
+    type(file_node), intent(inout) :: node
+    integer :: i
+
+    ! Deallocate children recursively
+    if (allocated(node%children)) then
+      do i = 1, node%num_children
+        call deallocate_child_tree(node%children(i))
+      end do
+      deallocate(node%children)
+    end if
+
+    ! Deallocate strings
+    if (allocated(node%name)) deallocate(node%name)
+    if (allocated(node%path)) deallocate(node%path)
+  end subroutine deallocate_child_tree
 
   ! Scan a directory and build a file tree (with optional depth limiting)
   recursive subroutine scan_directory(path, node, current_depth)
@@ -246,6 +268,8 @@ contains
         valid_children = 0
         do i = 1, num_entries
           if (should_skip_dir(entries(i))) cycle
+          ! Skip hidden files if show_hidden_files is false
+          if (.not. show_hidden_files .and. is_hidden_file(entries(i))) cycle
           child_path = trim(path) // get_path_separator() // trim(entries(i))
           if (is_symlink(child_path)) cycle
           valid_children = valid_children + 1
@@ -253,12 +277,22 @@ contains
 
         ! Allocate exact size needed
         if (valid_children > 0) then
+          ! Deallocate old children array if it exists (from previous scan)
+          if (allocated(node%children)) then
+            ! Recursively deallocate each child first
+            do i = 1, node%num_children
+              call deallocate_child_tree(node%children(i))
+            end do
+            deallocate(node%children)
+          end if
           allocate(node%children(valid_children))
           node%num_children = 0
 
           ! Second pass: scan children
           do i = 1, num_entries
             if (should_skip_dir(entries(i))) cycle
+            ! Skip hidden files if show_hidden_files is false
+            if (.not. show_hidden_files .and. is_hidden_file(entries(i))) cycle
             child_path = trim(path) // get_path_separator() // trim(entries(i))
             if (is_symlink(child_path)) cycle
 
@@ -296,7 +330,7 @@ contains
   ! Build tree from a root path
   subroutine build_tree(root_path, root_node)
     character(len=*), intent(in) :: root_path
-    type(file_node), intent(out) :: root_node
+    type(file_node), intent(inout) :: root_node  ! Changed from intent(out) to avoid auto-deallocation
 
     call scan_directory(root_path, root_node)
   end subroutine build_tree
@@ -397,5 +431,25 @@ contains
       end do
     end if
   end subroutine dump_node_recursive
+
+  ! Set whether to show hidden files (dotfiles)
+  subroutine set_show_hidden_files(show)
+    logical, intent(in) :: show
+    show_hidden_files = show
+    print *, "Disk scanner: show_hidden_files = ", show_hidden_files
+  end subroutine set_show_hidden_files
+
+  ! Check if a filename is hidden (starts with '.')
+  pure function is_hidden_file(filename) result(is_hidden)
+    character(len=*), intent(in) :: filename
+    logical :: is_hidden
+
+    is_hidden = .false.
+    if (len_trim(filename) > 0) then
+      if (filename(1:1) == '.') then
+        is_hidden = .true.
+      end if
+    end if
+  end function is_hidden_file
 
 end module disk_scanner
