@@ -46,6 +46,11 @@ module types
     logical :: is_selected  ! True if this node is currently selected
     logical :: is_hovered   ! True if mouse is hovering over this node
 
+    ! Progressive scan state (for dynamic rendering)
+    logical :: scan_complete  ! True when all children have been scanned
+    integer(int64) :: estimated_size  ! Estimated total size (grows as scan progresses)
+    logical :: is_scanning  ! True if currently being scanned
+
     ! Tree structure
     type(file_node), dimension(:), allocatable :: children
     integer :: num_children

@@ -4,12 +4,16 @@ module treemap_renderer
   use, intrinsic :: iso_c_binding
   use types
   use disk_scanner, only: build_tree
+  use progressive_scanner, only: start_progressive_scan, stop_progressive_scan, &
+                                  is_scan_active, register_scan_update_callback, &
+                                  register_scan_complete_callback
   use squarified_layout, only: calculate_treemap
   use cairo, only: cairo_set_source_rgb, cairo_rectangle, cairo_fill, &
                    cairo_stroke, cairo_set_line_width, cairo_select_font_face, &
                    cairo_set_font_size, cairo_move_to, cairo_show_text, &
                    cairo_set_source_rgba
   use g, only: g_main_context_default, g_main_context_iteration
+  use gtk, only: gtk_widget_queue_draw
   use iso_fortran_env, only: int64
   implicit none
   private
@@ -20,7 +24,7 @@ module treemap_renderer
             get_node_center_by_index, find_node_in_direction, register_progress_callback, &
             scan_directory, invalidate_layout, get_current_view_node, remove_selected_node_from_view, &
             clear_cache, toggle_file_extensions, toggle_age_based_coloring, toggle_size_display_mode, &
-            toggle_hidden_files, toggle_render_mode
+            toggle_hidden_files, toggle_render_mode, set_redraw_widget, register_scan_completion_callback
 
   ! Callback interfaces for progress updates
   abstract interface
@@ -35,6 +39,9 @@ module treemap_renderer
       real(c_double), intent(in) :: fraction
       character(len=*), intent(in) :: message
     end subroutine update_progress_callback
+
+    subroutine scan_completion_callback()
+    end subroutine scan_completion_callback
   end interface
 
   ! Directory cache entry
@@ -76,6 +83,10 @@ module treemap_renderer
   procedure(show_progress_callback), pointer, save :: show_progress_cb => null()
   procedure(hide_progress_callback), pointer, save :: hide_progress_cb => null()
   procedure(update_progress_callback), pointer, save :: update_progress_cb => null()
+  procedure(scan_completion_callback), pointer, save :: scan_completion_cb => null()
+
+  ! Widget pointer for progressive scan redraws
+  type(c_ptr), save :: widget_for_redraw = c_null_ptr
 
 contains
 
@@ -102,6 +113,43 @@ contains
     update_progress_cb => update_cb
     print *, "Progress callbacks registered"
   end subroutine register_progress_callback
+
+  ! Set widget for progressive scan redraws
+  subroutine set_redraw_widget(widget)
+    type(c_ptr), intent(in) :: widget
+    widget_for_redraw = widget
+    print *, "Redraw widget registered for progressive scanning"
+  end subroutine set_redraw_widget
+
+  ! Callback for progressive scan updates (called after each directory is scanned)
+  subroutine on_progressive_scan_update()
+    ! Invalidate layout to force recalculation with new data
+    call invalidate_layout()
+    ! Trigger widget redraw if available
+    if (c_associated(widget_for_redraw)) then
+      call gtk_widget_queue_draw(widget_for_redraw)
+    end if
+  end subroutine on_progressive_scan_update
+
+  ! Register scan completion callback
+  subroutine register_scan_completion_callback(callback)
+    procedure(scan_completion_callback) :: callback
+    scan_completion_cb => callback
+    print *, "Scan completion callback registered"
+  end subroutine register_scan_completion_callback
+
+  ! Callback for progressive scan completion
+  subroutine on_progressive_scan_complete()
+    print *, "Progressive scan complete - calling registered callback"
+    ! Call the registered completion callback
+    if (associated(scan_completion_cb)) then
+      call scan_completion_cb()
+    end if
+    ! Final redraw
+    if (c_associated(widget_for_redraw)) then
+      call gtk_widget_queue_draw(widget_for_redraw)
+    end if
+  end subroutine on_progressive_scan_complete
 
   ! Get root node (for external access)
   function get_root_node() result(node_ptr)
@@ -170,27 +218,28 @@ contains
       ! Deallocate old root_node before loading from cache
       call deallocate_tree(root_node)
       root_node = dir_cache(cache_index)%node  ! Deep copy from cache
-    else
-      ! Scan the directory tree (recursively gets all files)
-      if (associated(update_progress_cb)) call update_progress_cb(0.3_c_double, 'Scanning directories...')
-      ! Process events
-      do while (g_main_context_iteration(context, 0_c_int) /= 0_c_int)
-      end do
-
-      ! Build new tree - Fortran will handle memory reallocation naturally
-      ! Cache entries are shallow copies, so we don't manually deallocate
-      call build_tree(expanded_path, root_node)
-
-      ! Assign colors to nodes BEFORE caching
-      if (associated(update_progress_cb)) call update_progress_cb(0.85_c_double, 'Assigning colors...')
-      ! Process events
-      do while (g_main_context_iteration(context, 0_c_int) /= 0_c_int)
-      end do
-
+      ! Apply colors to cached tree
       call color_tree(root_node, 0)
+    else
+      ! Use progressive scanning for real-time treemap updates
+      if (associated(update_progress_cb)) call update_progress_cb(0.3_c_double, 'Starting progressive scan...')
+      ! Process events
+      do while (g_main_context_iteration(context, 0_c_int) /= 0_c_int)
+      end do
 
-      ! Store in cache (now with colors)
-      call cache_store(expanded_path, root_node)
+      ! Register update callback for progressive scanning
+      call register_scan_update_callback(on_progressive_scan_update)
+
+      ! Register completion callback
+      call register_scan_complete_callback(on_progressive_scan_complete)
+
+      ! Start progressive scan - this will scan one directory per idle iteration
+      call start_progressive_scan(root_node, expanded_path)
+
+      print *, "Progressive scan started - updates will occur in idle callbacks"
+      ! Note: The scan will continue asynchronously, calling on_progressive_scan_update
+      ! after each directory is scanned. We don't cache during progressive scans.
+      ! TODO: Cache when scan completes
     end if
 
     ! Start view at root level (showing only top-level items)
