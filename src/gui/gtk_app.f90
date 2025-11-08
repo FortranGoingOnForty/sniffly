@@ -24,7 +24,8 @@ module gtk_app
                              register_key_handler, register_quit_callback, register_delete_callback, &
                              register_refresh_callback, mark_initial_scan_complete, has_selection, &
                              get_selected_node_path
-  use treemap_renderer, only: register_progress_callback, scan_directory
+  use treemap_renderer, only: register_progress_callback, scan_directory, set_redraw_widget, &
+                               register_scan_completion_callback
   implicit none
   private
 
@@ -292,6 +293,9 @@ contains
     call gtk_widget_set_hexpand(drawing_area, 1_c_int)
     call gtk_widget_set_vexpand(drawing_area, 1_c_int)
 
+    ! Register widget with renderer for progressive scan redraws
+    call set_redraw_widget(drawing_area)
+
     ! Set the scan path
     call set_scan_path(scan_path)
 
@@ -313,6 +317,10 @@ contains
     ! Register progress callbacks
     call register_progress_callback(sniffly_show_progress, sniffly_hide_progress, &
                                       sniffly_update_progress)
+
+    ! Register scan completion callback
+    call register_scan_completion_callback(mark_initial_scan_complete)
+    print *, "Scan completion callback registered"
 
     ! Add drawing area to main box
     call gtk_box_append(main_box, drawing_area)
@@ -1316,8 +1324,8 @@ contains
     print *, "Performing initial scan in idle callback..."
     call scan_directory(pending_scan_path)
 
-    ! Mark initial scan as complete so draw callback can proceed
-    call mark_initial_scan_complete()
+    ! Note: mark_initial_scan_complete() is now called by the progressive scanner
+    ! when the scan actually completes (not immediately when it starts)
 
     ! Invalidate layout to force recalculation
     call invalidate_layout()

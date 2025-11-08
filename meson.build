@@ -66,9 +66,10 @@ c_sources = [
 
 # Fortran source files
 core_sources = [
-  'src/core/types.f90',           # Must be first (no dependencies)
-  'src/core/file_system.f90',     # Depends on types
-  'src/core/disk_scanner.f90',    # Depends on types, file_system
+  'src/core/types.f90',              # Must be first (no dependencies)
+  'src/core/file_system.f90',        # Depends on types
+  'src/core/disk_scanner.f90',       # Depends on types, file_system
+  'src/core/progressive_scanner.f90', # Depends on types, file_system
 ]
 
 layout_sources = [
