@@ -9,7 +9,10 @@ module progressive_scanner
 
   public :: start_progressive_scan, stop_progressive_scan, is_scan_active, &
             get_scan_progress, register_scan_update_callback, register_scan_complete_callback, &
-            register_initial_level_complete_callback
+            register_initial_level_complete_callback, set_show_hidden_files
+
+  ! Hidden files visibility setting
+  logical, save :: show_hidden_files = .true.
 
   ! Scan queue entry
   type :: queue_entry
@@ -233,10 +236,12 @@ contains
 
     ! For root directory (depth 0), build the children array
     if (depth == 0) then
-      ! Count valid entries (non-symlinks)
+      ! Count valid entries (non-symlinks, respect hidden file setting)
       child_count = 0
       do i = 1, num_entries
         if (len_trim(entries(i)) == 0) cycle
+        ! Skip hidden files if show_hidden_files is false
+        if (.not. show_hidden_files .and. is_hidden_file(entries(i))) cycle
         child_path = trim(path) // "/" // trim(entries(i))
         if (.not. is_symlink(child_path)) then
           child_count = child_count + 1
@@ -253,6 +258,8 @@ contains
         ! Create child nodes and track which array index each child gets
         do i = 1, num_entries
           if (len_trim(entries(i)) == 0) cycle
+          ! Skip hidden files if show_hidden_files is false
+          if (.not. show_hidden_files .and. is_hidden_file(entries(i))) cycle
           child_path = trim(path) // "/" // trim(entries(i))
           if (is_symlink(child_path)) cycle
 
@@ -313,6 +320,8 @@ contains
       ! For subdirectories (depth > 0), accumulate sizes by matching path prefixes
       do i = 1, num_entries
         if (len_trim(entries(i)) == 0) cycle
+        ! Skip hidden files if show_hidden_files is false
+        if (.not. show_hidden_files .and. is_hidden_file(entries(i))) cycle
         child_path = trim(path) // "/" // trim(entries(i))
         if (is_symlink(child_path)) cycle
 
@@ -537,5 +546,25 @@ contains
     if (.not. associated(scan_state%root)) return
     call group_small_files(scan_state%root)
   end subroutine group_small_files_root
+
+  ! Set whether to show hidden files (dotfiles)
+  subroutine set_show_hidden_files(show)
+    logical, intent(in) :: show
+    show_hidden_files = show
+    print *, "Progressive scanner: show_hidden_files = ", show_hidden_files
+  end subroutine set_show_hidden_files
+
+  ! Check if a filename is hidden (starts with '.')
+  pure function is_hidden_file(filename) result(is_hidden)
+    character(len=*), intent(in) :: filename
+    logical :: is_hidden
+
+    is_hidden = .false.
+    if (len_trim(filename) > 0) then
+      if (filename(1:1) == '.') then
+        is_hidden = .true.
+      end if
+    end if
+  end function is_hidden_file
 
 end module progressive_scanner

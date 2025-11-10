@@ -9,10 +9,12 @@
 
 program sniffly_main
   use gtk_app
+  use file_system, only: get_absolute_path
   implicit none
 
   integer :: exit_status, nargs
   character(len=512) :: arg, scan_dir
+  character(len=:), allocatable :: abs_path
 
   ! Print banner
   print '(A)', "======================================"
@@ -27,7 +29,9 @@ program sniffly_main
 
   if (nargs > 0) then
     call get_command_argument(1, arg)
-    scan_dir = trim(arg)
+    ! Expand relative paths to absolute paths
+    abs_path = get_absolute_path(trim(arg))
+    scan_dir = abs_path
     print '(A,A)', "Directory to scan: ", trim(scan_dir)
     call sniffly_set_scan_path(scan_dir)
   else
