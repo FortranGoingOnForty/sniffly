@@ -8,7 +8,8 @@ module progressive_scanner
   private
 
   public :: start_progressive_scan, stop_progressive_scan, is_scan_active, &
-            get_scan_progress, register_scan_update_callback, register_scan_complete_callback
+            get_scan_progress, register_scan_update_callback, register_scan_complete_callback, &
+            register_initial_level_complete_callback
 
   ! Scan queue entry
   type :: queue_entry
@@ -50,8 +51,15 @@ module progressive_scanner
     end subroutine scan_complete_callback
   end interface
 
+  ! Callback for initial level (depth 0) completion
+  abstract interface
+    subroutine initial_level_callback()
+    end subroutine initial_level_callback
+  end interface
+
   procedure(scan_update_callback), pointer, save :: update_callback => null()
   procedure(scan_complete_callback), pointer, save :: complete_callback => null()
+  procedure(initial_level_callback), pointer, save :: initial_level_cb => null()
 
 contains
 
@@ -66,6 +74,12 @@ contains
     procedure(scan_complete_callback) :: callback
     complete_callback => callback
   end subroutine register_scan_complete_callback
+
+  ! Register callback to be called when initial level (depth 0) completes
+  subroutine register_initial_level_complete_callback(callback)
+    procedure(initial_level_callback) :: callback
+    initial_level_cb => callback
+  end subroutine register_initial_level_complete_callback
 
   ! Start progressive scan of a directory
   subroutine start_progressive_scan(root_node, path)
@@ -222,7 +236,7 @@ contains
         allocate(temp_children(child_count))
         child_count = 0
 
-        ! Create child nodes
+        ! Create child nodes and track which array index each child gets
         do i = 1, num_entries
           if (len_trim(entries(i)) == 0) cycle
           child_path = trim(path) // "/" // trim(entries(i))
@@ -239,7 +253,8 @@ contains
             temp_children(child_count)%num_children = 0
             temp_children(child_count)%scan_complete = .false.
             temp_children(child_count)%is_scanning = .true.
-            ! Enqueue subdirectory for later scanning - pass child_count as the root child index
+            ! Enqueue subdirectory - pass the ACTUAL array index (child_count) as root_child_index
+            print *, "  Enqueueing ", trim(entries(i)), " as root child index ", child_count
             call enqueue(child_path, child_count, child_count, depth + 1)
             scan_state%total_dirs_found = scan_state%total_dirs_found + 1
           else
@@ -264,17 +279,24 @@ contains
 
         print *, "  Root now has ", scan_state%root%num_children, " children"
 
+        ! DEBUG: Print first 10 directory children to verify indexing
+        do i = 1, min(20, scan_state%root%num_children)
+          if (scan_state%root%children(i)%is_directory) then
+            print *, "    Child ", i, ": ", trim(scan_state%root%children(i)%name), " (directory)"
+          end if
+        end do
+
         ! Color the tree before showing it
         call color_root_children()
 
-        ! Call completion callback for initial level (so UI can start rendering)
-        if (associated(complete_callback)) then
+        ! Call initial level callback (so UI can start rendering)
+        if (associated(initial_level_cb)) then
           print *, "Initial level scan complete - notifying callback"
-          call complete_callback()
+          call initial_level_cb()
         end if
       end if
     else
-      ! For subdirectories (depth > 0), accumulate sizes and propagate to root child
+      ! For subdirectories (depth > 0), accumulate sizes by matching path prefixes
       do i = 1, num_entries
         if (len_trim(entries(i)) == 0) cycle
         child_path = trim(path) // "/" // trim(entries(i))
@@ -285,21 +307,12 @@ contains
           call enqueue(child_path, 0, root_child_index, depth + 1)
           scan_state%total_dirs_found = scan_state%total_dirs_found + 1
         else
-          ! It's a file - add its size to the corresponding root child
+          ! It's a file - find which root child it belongs to by path matching
           file_size = get_file_size(child_path)
-          if (root_child_index > 0 .and. root_child_index <= scan_state%root%num_children) then
-            ! Update the root child's size (this creates the animation!)
-            if (scan_state%dirs_scanned < 5) then
-              print *, "  DEBUG: Adding size ", file_size, " to root child ", root_child_index, &
-                       " (", trim(scan_state%root%children(root_child_index)%name), ")"
-            end if
-            scan_state%root%children(root_child_index)%size = &
-              scan_state%root%children(root_child_index)%size + file_size
-          else
-            if (scan_state%dirs_scanned < 5) then
-              print *, "  DEBUG: WARNING - invalid root_child_index: ", root_child_index
-            end if
-          end if
+
+          ! Find the root child whose path is a prefix of this file's path
+          call find_and_update_root_child(child_path, file_size)
+
           ! Also update root total
           scan_state%root%estimated_size = scan_state%root%estimated_size + file_size
           scan_state%root%size = scan_state%root%estimated_size
@@ -307,6 +320,52 @@ contains
       end do
     end if
   end subroutine scan_single_directory
+
+  ! Find which root child a file belongs to and update its size
+  subroutine find_and_update_root_child(file_path, file_size)
+    character(len=*), intent(in) :: file_path
+    integer(int64), intent(in) :: file_size
+    integer :: root_idx
+    integer :: path_len, child_path_len
+    logical :: found
+
+    if (.not. associated(scan_state%root)) return
+    if (scan_state%root%num_children == 0) return
+
+    found = .false.
+
+    ! Try to find a root child whose path is a prefix of this file's path
+    do root_idx = 1, scan_state%root%num_children
+      if (.not. scan_state%root%children(root_idx)%is_directory) cycle
+
+      child_path_len = len_trim(scan_state%root%children(root_idx)%path)
+      path_len = len_trim(file_path)
+
+      ! Check if child path is a prefix of file path
+      ! Also ensure we match directory boundaries (check for '/' after the prefix)
+      if (path_len > child_path_len) then
+        if (file_path(1:child_path_len) == scan_state%root%children(root_idx)%path(1:child_path_len)) then
+          ! Ensure we're matching at a directory boundary
+          if (file_path(child_path_len+1:child_path_len+1) == '/') then
+            ! Found the matching root child!
+            scan_state%root%children(root_idx)%size = &
+              scan_state%root%children(root_idx)%size + file_size
+
+            if (scan_state%dirs_scanned < 5) then
+              print *, "  Path-matched: ", trim(file_path), " -> root child ", root_idx, &
+                       " (", trim(scan_state%root%children(root_idx)%name), ")"
+            end if
+            found = .true.
+            exit
+          end if
+        end if
+      end if
+    end do
+
+    if (.not. found .and. scan_state%dirs_scanned < 5) then
+      print *, "  WARNING: No root child found for: ", trim(file_path)
+    end if
+  end subroutine find_and_update_root_child
 
   ! Enqueue a directory for scanning
   subroutine enqueue(path, node_index, parent_id, depth)

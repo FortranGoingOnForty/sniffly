@@ -6,7 +6,8 @@ module treemap_renderer
   use disk_scanner, only: build_tree
   use progressive_scanner, only: start_progressive_scan, stop_progressive_scan, &
                                   is_scan_active, register_scan_update_callback, &
-                                  register_scan_complete_callback
+                                  register_scan_complete_callback, &
+                                  register_initial_level_complete_callback
   use squarified_layout, only: calculate_treemap
   use cairo, only: cairo_set_source_rgb, cairo_rectangle, cairo_fill, &
                    cairo_stroke, cairo_set_line_width, cairo_select_font_face, &
@@ -123,8 +124,23 @@ contains
 
   ! Callback for progressive scan updates (called after each directory is scanned)
   subroutine on_progressive_scan_update()
+    use progressive_scanner, only: get_scan_progress
+    real :: progress
+    character(len=256) :: status_msg
+    integer :: dirs_done, total_dirs
+
+    ! Get progress from progressive scanner
+    progress = get_scan_progress()
+
+    ! Update progress bar and status
+    if (associated(update_progress_cb)) then
+      write(status_msg, '(A,F5.1,A)') 'Scanning directories... ', progress * 100.0, '%'
+      call update_progress_cb(real(progress, c_double), trim(status_msg))
+    end if
+
     ! Invalidate layout to force recalculation with new data
     call invalidate_layout()
+
     ! Trigger widget redraw if available
     if (c_associated(widget_for_redraw)) then
       call gtk_widget_queue_draw(widget_for_redraw)
@@ -138,17 +154,39 @@ contains
     print *, "Scan completion callback registered"
   end subroutine register_scan_completion_callback
 
-  ! Callback for progressive scan completion
-  subroutine on_progressive_scan_complete()
-    print *, "Progressive scan complete - calling registered callback"
-    ! Call the registered completion callback
+  ! Callback for initial level completion (depth 0 done)
+  subroutine on_initial_level_complete()
+    print *, "Initial level complete - starting UI rendering (subdirectories will continue scanning)"
+
+    ! Mark initial scan as complete so UI can start rendering
     if (associated(scan_completion_cb)) then
       call scan_completion_cb()
     end if
+
+    ! Trigger first redraw (progress bar stays visible)
+    if (c_associated(widget_for_redraw)) then
+      call gtk_widget_queue_draw(widget_for_redraw)
+    end if
+  end subroutine on_initial_level_complete
+
+  ! Callback for progressive scan completion (fully done)
+  subroutine on_progressive_scan_complete()
+    print *, "Progressive scan FULLY complete - hiding progress bar"
+
+    ! Update progress to 100% and hide progress bar
+    if (associated(update_progress_cb)) then
+      call update_progress_cb(1.0_c_double, 'Scan complete')
+    end if
+    if (associated(hide_progress_cb)) then
+      call hide_progress_cb()
+    end if
+
     ! Final redraw
     if (c_associated(widget_for_redraw)) then
       call gtk_widget_queue_draw(widget_for_redraw)
     end if
+
+    print *, "Scan complete. Final root size: ", root_node%size, " bytes"
   end subroutine on_progressive_scan_complete
 
   ! Get root node (for external access)
@@ -230,7 +268,10 @@ contains
       ! Register update callback for progressive scanning
       call register_scan_update_callback(on_progressive_scan_update)
 
-      ! Register completion callback
+      ! Register initial level completion callback
+      call register_initial_level_complete_callback(on_initial_level_complete)
+
+      ! Register full completion callback
       call register_scan_complete_callback(on_progressive_scan_complete)
 
       ! Start progressive scan - this will scan one directory per idle iteration
@@ -239,7 +280,7 @@ contains
       print *, "Progressive scan started - updates will occur in idle callbacks"
       ! Note: The scan will continue asynchronously, calling on_progressive_scan_update
       ! after each directory is scanned. We don't cache during progressive scans.
-      ! TODO: Cache when scan completes
+      ! Progress bar will be updated by the progressive scanner
     end if
 
     ! Start view at root level (showing only top-level items)
@@ -249,16 +290,16 @@ contains
     path_depth = 1
     path_names(1) = trim(scanned_path)
 
-    ! Update progress and hide progress bar
-    if (associated(update_progress_cb)) call update_progress_cb(1.0_c_double, 'Scan complete')
-    ! Process events one more time
-    do while (g_main_context_iteration(context, 0_c_int) /= 0_c_int)
-    end do
-
-    if (associated(hide_progress_cb)) call hide_progress_cb()
-
-    print *, "Scan complete. Root size: ", root_node%size, " bytes"
-    print *, "Children: ", root_node%num_children
+    ! For cached scans, hide progress bar now since scan is complete
+    if (cache_index > 0) then
+      if (associated(update_progress_cb)) call update_progress_cb(1.0_c_double, 'Loaded from cache')
+      if (associated(hide_progress_cb)) call hide_progress_cb()
+      print *, "Scan complete (from cache). Root size: ", root_node%size, " bytes"
+      print *, "Children: ", root_node%num_children
+    else
+      ! For progressive scans, keep progress bar visible - it will be updated during scan
+      print *, "Progressive scan in progress. Root level complete with ", root_node%num_children, " children"
+    end if
 
     ! Invalidate layout cache to force recalculation with new data
     call invalidate_layout()
