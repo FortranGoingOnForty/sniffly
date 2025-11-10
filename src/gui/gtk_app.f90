@@ -135,13 +135,15 @@ contains
                                       int(DEFAULT_WIDTH, c_int), &
                                       int(DEFAULT_HEIGHT, c_int))
 
-    ! Use global scan path or default
+    ! Use global scan path or home directory
     if (len_trim(global_scan_path) > 0) then
       scan_path = global_scan_path
       print *, "Using specified directory: ", trim(scan_path)
     else
-      scan_path = "/Users/matthewwolffe/Downloads"
-      print *, "Using default directory: ", trim(scan_path)
+      ! No directory specified - use home directory and prompt user
+      scan_path = get_home_directory()
+      print *, "No directory specified, using home directory: ", trim(scan_path)
+      print *, "Click the folder icon to select a different directory"
     end if
 
     ! Create main vertical box (toolbar + treemap)
@@ -595,7 +597,14 @@ contains
 
   ! Callback when Back button is clicked
   subroutine on_back_clicked(button, user_data) bind(c)
+    use progressive_scanner, only: is_scan_active
     type(c_ptr), value :: button, user_data
+
+    ! Block navigation if scan is active
+    if (is_scan_active()) then
+      call sniffly_update_status("Cannot navigate: Scan in progress")
+      return
+    end if
 
     if (nav_history_pos > 1) then
       nav_history_pos = nav_history_pos - 1
@@ -611,7 +620,14 @@ contains
 
   ! Callback when Forward button is clicked
   subroutine on_forward_clicked(button, user_data) bind(c)
+    use progressive_scanner, only: is_scan_active
     type(c_ptr), value :: button, user_data
+
+    ! Block navigation if scan is active
+    if (is_scan_active()) then
+      call sniffly_update_status("Cannot navigate: Scan in progress")
+      return
+    end if
 
     if (nav_history_pos > 0 .and. nav_history_pos < nav_history_count) then
       nav_history_pos = nav_history_pos + 1
@@ -1344,5 +1360,21 @@ contains
     ! Return 0 to indicate this callback should not be called again
     continue = 0_c_int
   end function perform_initial_scan
+
+  ! Get user's home directory
+  function get_home_directory() result(home_path)
+    character(len=512) :: home_path
+    character(len=512) :: env_value
+    integer :: status
+
+    ! Try to get HOME environment variable
+    call get_environment_variable("HOME", env_value, status=status)
+    if (status == 0) then
+      home_path = trim(env_value)
+    else
+      ! Fallback to /Users/username on macOS or /home/username on Linux
+      home_path = "/Users"
+    end if
+  end function get_home_directory
 
 end module gtk_app

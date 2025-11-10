@@ -11,7 +11,7 @@ module treemap_renderer
   use squarified_layout, only: calculate_treemap
   use cairo, only: cairo_set_source_rgb, cairo_rectangle, cairo_fill, &
                    cairo_stroke, cairo_set_line_width, cairo_select_font_face, &
-                   cairo_set_font_size, cairo_move_to, cairo_show_text, &
+                   cairo_set_font_size, cairo_move_to, cairo_line_to, cairo_show_text, &
                    cairo_set_source_rgba
   use g, only: g_main_context_default, g_main_context_iteration
   use gtk, only: gtk_widget_queue_draw
@@ -507,6 +507,12 @@ contains
   subroutine navigate_into_node(index)
     integer, intent(in) :: index
 
+    ! Block navigation if scan is active
+    if (is_scan_active()) then
+      print *, "Navigation blocked: Scan in progress"
+      return
+    end if
+
     ! Validate inputs
     if (.not. associated(current_view_node)) then
       print *, "ERROR: No current view node!"
@@ -582,6 +588,12 @@ contains
     character(len=512) :: parent_path, current_root_path
     character(len=1) :: sep
     type(file_node), pointer :: temp_node
+
+    ! Block navigation if scan is active
+    if (is_scan_active()) then
+      print *, "Navigation blocked: Scan in progress"
+      return
+    end if
 
     if (present(levels)) then
       levels_to_go = levels
@@ -1153,7 +1165,9 @@ contains
     integer :: i
 
     ! Ridge height factor (controls the "bumpiness" of the cushion)
-    f = 0.5d0
+    ! Higher values = more pronounced 3D effect
+    ! Need very large values because we divide by w² (pixels²)
+    f = 50000.0d0
 
     ! Get rectangle bounds
     x = real(node%bounds%x, real64)
@@ -1186,7 +1200,7 @@ contains
 
     ! Add this node's cushion ridge
     if (w > 0.0d0 .and. h > 0.0d0) then
-      ! Add quadratic terms
+      ! Add quadratic terms (Van Wijk algorithm)
       node%cushion%ax = node%cushion%ax + f / (w * w)
       node%cushion%ay = node%cushion%ay + f / (h * h)
 
@@ -1307,7 +1321,6 @@ contains
     type(c_ptr), intent(in) :: cr
     type(file_node), intent(in) :: node
     real(c_double) :: x, y, w, h
-    real(c_double) :: shaded_r, shaded_g, shaded_b, shading
     logical :: can_show_label
 
     ! Don't render tiny rectangles
@@ -1321,28 +1334,37 @@ contains
     ! Check if we can show a full label
     can_show_label = (w >= 50.0d0 .and. h >= 20.0d0)
 
-    ! Apply cushion shading if enabled, otherwise use flat colors
-    if (use_cushion_shading) then
-      ! Calculate cushion shading
-      shading = calculate_cushion_shading(x, y, w, h, node%cushion)
-
-      ! Apply shading to base color
-      shaded_r = node%color%r * shading
-      shaded_g = node%color%g * shading
-      shaded_b = node%color%b * shading
-    else
-      ! Flat rendering - use base colors directly
-      shaded_r = node%color%r
-      shaded_g = node%color%g
-      shaded_b = node%color%b
-    end if
-
-    ! Fill rectangle with shaded color
-    call cairo_set_source_rgb(cr, shaded_r, shaded_g, shaded_b)
+    ! Fill rectangle with base color (same for both modes)
+    call cairo_set_source_rgb(cr, node%color%r, node%color%g, node%color%b)
     call cairo_rectangle(cr, x, y, w, h)
     call cairo_fill(cr)
 
-    ! Draw border
+    ! DEBUG: Check flag value (print only once per render)
+    ! if (w > 100.0d0) print *, "DEBUG render_node: use_cushion_shading=", use_cushion_shading
+
+    if (use_cushion_shading) then
+      ! 3D mode: Draw highlight and shadow lines for embossed effect
+      ! Only draw if rectangle is large enough
+      if (w > 6.0d0 .and. h > 6.0d0) then
+        ! Top-left highlight (inset by 1px to be inside border)
+        call cairo_set_source_rgba(cr, 1.0d0, 1.0d0, 1.0d0, 0.6d0)
+        call cairo_set_line_width(cr, 3.0d0)
+        call cairo_move_to(cr, x + 2.0d0, y + h - 2.0d0)
+        call cairo_line_to(cr, x + 2.0d0, y + 2.0d0)
+        call cairo_line_to(cr, x + w - 2.0d0, y + 2.0d0)
+        call cairo_stroke(cr)
+
+        ! Bottom-right shadow (inset by 1px to be inside border)
+        call cairo_set_source_rgba(cr, 0.0d0, 0.0d0, 0.0d0, 0.5d0)
+        call cairo_set_line_width(cr, 3.0d0)
+        call cairo_move_to(cr, x + 2.0d0, y + h - 2.0d0)
+        call cairo_line_to(cr, x + w - 2.0d0, y + h - 2.0d0)
+        call cairo_line_to(cr, x + w - 2.0d0, y + 2.0d0)
+        call cairo_stroke(cr)
+      end if
+    end if
+
+    ! Always draw border (for both flat and 3D modes)
     call cairo_set_source_rgb(cr, 0.0d0, 0.0d0, 0.0d0)
     call cairo_set_line_width(cr, 1.0d0)
     call cairo_rectangle(cr, x, y, w, h)
@@ -1388,8 +1410,8 @@ contains
     lz = 0.707d0  ! sqrt(1 - lx^2 - ly^2)
 
     ! Ambient and diffuse lighting coefficients
-    ambient = 0.4d0  ! Base lighting
-    diffuse = 0.6d0  ! Directional lighting strength
+    ambient = 0.3d0  ! Base lighting (lowered for more contrast)
+    diffuse = 0.7d0  ! Directional lighting strength (increased for more pronounced effect)
 
     ! Calculate center of rectangle
     cx = x + w / 2.0d0
@@ -1402,6 +1424,11 @@ contains
     nx = -(2.0d0 * cushion%ax * cx + cushion%bx)
     ny = -(2.0d0 * cushion%ay * cy + cushion%by)
     nz = 1.0d0
+
+    ! Debug: Print cushion params for first rectangle
+    if (abs(cushion%ax) > 1e-10 .or. abs(cushion%ay) > 1e-10) then
+      ! Only print if we have non-zero cushion params (skip spam)
+    end if
 
     ! Normalize the normal vector
     norm = sqrt(nx*nx + ny*ny + nz*nz)
@@ -1422,6 +1449,9 @@ contains
     ! Combine ambient and diffuse lighting
     intensity = ambient + diffuse * dot_product
     intensity = min(1.0d0, max(0.0d0, intensity))  ! Clamp to [0,1]
+
+    ! Debug output (only print occasionally to avoid spam)
+    ! print *, "Shading: cushion%ax=", cushion%ax, " intensity=", intensity
   end function calculate_cushion_shading
 
   ! Render ellipsis for small rectangles
@@ -1637,12 +1667,14 @@ contains
 
   ! Toggle hidden files (dotfiles) visibility
   subroutine toggle_hidden_files()
-    use disk_scanner, only: set_show_hidden_files
+    use disk_scanner, only: disk_scanner_set_show_hidden_files => set_show_hidden_files
+    use progressive_scanner, only: progressive_scanner_set_show_hidden_files => set_show_hidden_files
 
     show_hidden_files = .not. show_hidden_files
 
-    ! Update scanner setting
-    call set_show_hidden_files(show_hidden_files)
+    ! Update scanner settings for both scanners
+    call disk_scanner_set_show_hidden_files(show_hidden_files)
+    call progressive_scanner_set_show_hidden_files(show_hidden_files)
 
     if (show_hidden_files) then
       print *, "Hidden files (dotfiles) shown - rescan needed"
@@ -1657,14 +1689,23 @@ contains
 
   ! Toggle render mode (flat vs cushioned/3D)
   subroutine toggle_render_mode()
+    print *, "=== TOGGLE_RENDER_MODE CALLED ==="
+    print *, "use_cushion_shading before:", use_cushion_shading
     use_cushion_shading = .not. use_cushion_shading
+    print *, "use_cushion_shading after:", use_cushion_shading
     if (use_cushion_shading) then
       print *, "Cushioned (3D) rendering enabled"
     else
       print *, "Flat rendering enabled"
     end if
-    ! Just need to redraw, no rescan needed
+    ! Invalidate layout and trigger redraw
     call invalidate_layout()
+    if (c_associated(widget_for_redraw)) then
+      call gtk_widget_queue_draw(widget_for_redraw)
+      print *, "Redraw queued for render mode change"
+    else
+      print *, "ERROR: widget_for_redraw not associated!"
+    end if
   end subroutine toggle_render_mode
 
   ! Render text label for a node
