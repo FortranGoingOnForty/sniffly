@@ -1,0 +1,10 @@
+! Auto-generated version module
+! Do not edit - generated from version.f90.in by Meson
+module version
+  implicit none
+
+  character(len=*), parameter :: SNIFFLY_VERSION = "@VERSION@"
+  character(len=*), parameter :: SNIFFLY_NAME = "Sniffly"
+  character(len=*), parameter :: SNIFFLY_DESCRIPTION = "Disk Space Analyzer"
+
+end module version
