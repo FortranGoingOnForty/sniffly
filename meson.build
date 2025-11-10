@@ -2,7 +2,7 @@
 # Build configuration using Meson
 
 project('sniffly', ['fortran', 'c'],
-  version: '0.1.0',
+  version: '0.2.4',  # Also maintained in VERSION file
   license: 'MIT',
   default_options: [
     'warning_level=3',
@@ -56,6 +56,15 @@ endif
 message('GTK4-Fortran version: ' + gtk4_dep.version())
 message('Cairo version: ' + cairo_dep.version())
 
+# Generate version module from template
+version_data = configuration_data()
+version_data.set('VERSION', meson.project_version())
+version_f90 = configure_file(
+  input: 'src/version.f90.in',
+  output: 'version.f90',
+  configuration: version_data,
+)
+
 # Source files
 # Note: Order matters for Fortran modules (dependencies must come first)
 
@@ -66,6 +75,7 @@ c_sources = [
 
 # Fortran source files
 core_sources = [
+  version_f90,                       # Generated version module (no dependencies)
   'src/core/types.f90',              # Must be first (no dependencies)
   'src/core/file_system.f90',        # Depends on types
   'src/core/disk_scanner.f90',       # Depends on types, file_system
@@ -128,11 +138,19 @@ if fortran.get_id() == 'gcc'
   ]
 endif
 
+# Linker flags for macOS app bundling
+# -headerpad_max_install_names reserves space for dylibbundler to rewrite library paths
+link_args = []
+if host_machine.system() == 'darwin'
+  link_args += ['-Wl,-headerpad_max_install_names']
+endif
+
 # Build executable
 executable('sniffly',
   sources: all_sources,
   dependencies: dependencies,
   fortran_args: fortran_args,
+  link_args: link_args,
   install: true,
   install_dir: get_option('bindir'))
 
