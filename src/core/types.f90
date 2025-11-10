@@ -51,6 +51,10 @@ module types
     integer(int64) :: estimated_size  ! Estimated total size (grows as scan progresses)
     logical :: is_scanning  ! True if currently being scanned
 
+    ! Flash highlight state (for visual feedback during size updates)
+    real(real64) :: flash_intensity  ! 0.0 to 1.0, decays over time
+    integer(int64) :: last_update_time  ! Timestamp of last size update (milliseconds)
+
     ! Tree structure
     type(file_node), dimension(:), allocatable :: children
     integer :: num_children

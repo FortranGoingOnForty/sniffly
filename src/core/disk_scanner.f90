@@ -8,7 +8,7 @@ module disk_scanner
   private
 
   public :: scan_directory, build_tree, calculate_sizes, dump_tree_debug, set_progress_callback, &
-             set_show_hidden_files
+             set_show_hidden_files, group_small_files
 
   ! Directories to skip (reduce scan time and avoid issues)
   character(len=*), parameter, dimension(7) :: SKIP_DIRS = &

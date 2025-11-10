@@ -63,6 +63,16 @@ module progressive_scanner
 
 contains
 
+  ! Get current time in milliseconds (for flash timing)
+  function get_time_ms() result(time_ms)
+    integer(int64) :: time_ms
+    integer :: count, count_rate, count_max
+
+    call system_clock(count, count_rate, count_max)
+    ! Convert to milliseconds
+    time_ms = int(count * 1000_int64 / count_rate, int64)
+  end function get_time_ms
+
   ! Register callback to be called after each scan update
   subroutine register_scan_update_callback(callback)
     procedure(scan_update_callback) :: callback
@@ -189,6 +199,10 @@ contains
       if (associated(scan_state%root)) then
         scan_state%root%scan_complete = .true.
         scan_state%root%is_scanning = .false.
+
+        ! Now that all sizes have been accumulated, group small files
+        print *, "Grouping small files after scan completion..."
+        call group_small_files_root()
       end if
       ! Call completion callback
       if (associated(complete_callback)) then
@@ -286,7 +300,7 @@ contains
           end if
         end do
 
-        ! Color the tree before showing it
+        ! Color the tree before showing it (don't group yet - sizes are still accumulating)
         call color_root_children()
 
         ! Call initial level callback (so UI can start rendering)
@@ -350,6 +364,10 @@ contains
             ! Found the matching root child!
             scan_state%root%children(root_idx)%size = &
               scan_state%root%children(root_idx)%size + file_size
+
+            ! Mark node for flash highlighting
+            scan_state%root%children(root_idx)%flash_intensity = 1.0d0
+            scan_state%root%children(root_idx)%last_update_time = get_time_ms()
 
             if (scan_state%dirs_scanned < 5) then
               print *, "  Path-matched: ", trim(file_path), " -> root child ", root_idx, &
@@ -511,5 +529,13 @@ contains
         color%r = c + m; color%g = m; color%b = x + m
     end select
   end subroutine set_color_from_hsv
+
+  ! Group small files at root level
+  subroutine group_small_files_root()
+    use disk_scanner, only: group_small_files
+
+    if (.not. associated(scan_state%root)) return
+    call group_small_files(scan_state%root)
+  end subroutine group_small_files_root
 
 end module progressive_scanner

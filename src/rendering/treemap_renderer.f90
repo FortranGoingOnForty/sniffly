@@ -138,6 +138,9 @@ contains
       call update_progress_cb(real(progress, c_double), trim(status_msg))
     end if
 
+    ! Decay flash intensities for all visible nodes
+    call decay_flash_highlights()
+
     ! Invalidate layout to force recalculation with new data
     call invalidate_layout()
 
@@ -530,6 +533,18 @@ contains
     print *, "Restoring sizes before navigation..."
     call recalculate_sizes(root_node)
 
+    ! Check if the directory needs to be scanned (progressive scan didn't populate children)
+    if (current_view_node%children(index)%num_children == 0 .and. &
+        allocated(current_view_node%children(index)%path)) then
+      ! This directory was created by progressive scan but never had children populated
+      ! We need to scan it now
+      print *, "Directory has no children - triggering rescan: ", &
+               trim(current_view_node%children(index)%path)
+
+      call scan_directory(trim(current_view_node%children(index)%path))
+      return  ! scan_directory will set current_view_node appropriately
+    end if
+
     ! Navigate into the directory
     current_view_node => current_view_node%children(index)
 
@@ -901,14 +916,14 @@ contains
     w = real(node%bounds%width, c_double)
     h = real(node%bounds%height, c_double)
 
-    ! Draw semi-transparent white overlay (40% opacity)
-    call cairo_set_source_rgba(cr, 1.0d0, 1.0d0, 1.0d0, 0.4d0)
+    ! Draw semi-transparent yellow overlay (30% opacity) - closer to selection color
+    call cairo_set_source_rgba(cr, 1.0d0, 0.9d0, 0.3d0, 0.3d0)
     call cairo_rectangle(cr, x, y, w, h)
     call cairo_fill(cr)
 
-    ! Draw thicker highlight border
-    call cairo_set_source_rgb(cr, 1.0d0, 1.0d0, 1.0d0)
-    call cairo_set_line_width(cr, 3.0d0)
+    ! Draw thicker yellow highlight border
+    call cairo_set_source_rgb(cr, 1.0d0, 0.9d0, 0.2d0)
+    call cairo_set_line_width(cr, 2.5d0)
     call cairo_rectangle(cr, x, y, w, h)
     call cairo_stroke(cr)
   end subroutine render_hover_highlight
@@ -936,6 +951,35 @@ contains
     call cairo_rectangle(cr, x + 2.0d0, y + 2.0d0, w - 4.0d0, h - 4.0d0)
     call cairo_stroke(cr)
   end subroutine render_selection_highlight
+
+  ! Render flash highlight overlay (for actively resizing items during scan)
+  subroutine render_flash_highlight(cr, node)
+    type(c_ptr), intent(in) :: cr
+    type(file_node), intent(in) :: node
+    real(c_double) :: x, y, w, h
+    real(c_double) :: intensity
+
+    ! Skip if flash intensity is too low
+    if (node%flash_intensity < 0.05d0) return
+
+    x = real(node%bounds%x, c_double)
+    y = real(node%bounds%y, c_double)
+    w = real(node%bounds%width, c_double)
+    h = real(node%bounds%height, c_double)
+    intensity = real(node%flash_intensity, c_double)
+
+    ! Draw bright cyan/white flash overlay (intensity-based opacity)
+    ! Cyan gives that "electric" SpaceSniffer feel
+    call cairo_set_source_rgba(cr, 0.3d0, 1.0d0, 1.0d0, intensity * 0.6d0)
+    call cairo_rectangle(cr, x, y, w, h)
+    call cairo_fill(cr)
+
+    ! Draw bright flash border
+    call cairo_set_source_rgba(cr, 0.5d0, 1.0d0, 1.0d0, intensity * 0.9d0)
+    call cairo_set_line_width(cr, 2.0d0)
+    call cairo_rectangle(cr, x, y, w, h)
+    call cairo_stroke(cr)
+  end subroutine render_flash_highlight
 
   ! Get file extension from filename
   function get_file_extension(filename) result(ext)
@@ -1304,6 +1348,11 @@ contains
     call cairo_rectangle(cr, x, y, w, h)
     call cairo_stroke(cr)
 
+    ! Render flash highlight if node is actively being updated
+    if (node%flash_intensity > 0.05d0) then
+      call render_flash_highlight(cr, node)
+    end if
+
     ! Render text label if rectangle is large enough
     if (can_show_label) then
       call render_label(cr, node, x, y, w, h)
@@ -1482,6 +1531,51 @@ contains
     cache_count = 0
     print *, "Directory cache cleared and deallocated"
   end subroutine clear_cache
+
+  ! Decay flash highlights for all visible nodes
+  subroutine decay_flash_highlights()
+    use iso_fortran_env, only: int64, real64
+    integer :: i
+    integer(int64) :: current_time, elapsed_ms
+    real(real64) :: decay_rate
+
+    if (.not. allocated(root_node%children)) return
+
+    ! Get current time
+    current_time = get_current_time_ms()
+
+    ! Decay rate: flash fades out over ~200ms
+    decay_rate = 0.15d0  ! Decay by 15% per update
+
+    ! Decay flash intensity for all root children
+    do i = 1, root_node%num_children
+      if (root_node%children(i)%flash_intensity > 0.01d0) then
+        ! Calculate time-based decay
+        elapsed_ms = current_time - root_node%children(i)%last_update_time
+
+        ! If it's been more than 50ms since last update, start decaying
+        if (elapsed_ms > 50_int64) then
+          root_node%children(i)%flash_intensity = &
+            root_node%children(i)%flash_intensity * (1.0d0 - decay_rate)
+
+          ! Clamp to zero when very small
+          if (root_node%children(i)%flash_intensity < 0.01d0) then
+            root_node%children(i)%flash_intensity = 0.0d0
+          end if
+        end if
+      end if
+    end do
+  end subroutine decay_flash_highlights
+
+  ! Get current time in milliseconds (wrapper for progressive_scanner function)
+  function get_current_time_ms() result(time_ms)
+    use iso_fortran_env, only: int64
+    integer(int64) :: time_ms
+    integer :: count, count_rate, count_max
+
+    call system_clock(count, count_rate, count_max)
+    time_ms = int(count * 1000_int64 / count_rate, int64)
+  end function get_current_time_ms
 
   ! Recursively deallocate a file tree
   recursive subroutine deallocate_tree(node)
