@@ -271,14 +271,21 @@ contains
           call nav_callback()
         end if
       else
-        ! Single click: just select
-        selected_index = clicked_index
-        print *, "Selected node index: ", selected_index
+        ! Single click: toggle selection
+        if (selected_index == clicked_index) then
+          ! Clicking same item again - deselect it
+          selected_index = 0
+          print *, "Deselected by clicking same item"
+        else
+          ! Clicking different item - select it
+          selected_index = clicked_index
+          print *, "Selected node index: ", selected_index
+        end if
       end if
     else
       ! Click outside any node - deselect
       selected_index = 0
-      print *, "Deselected"
+      print *, "Deselected by clicking empty space"
     end if
 
     ! Trigger redraw to show changes

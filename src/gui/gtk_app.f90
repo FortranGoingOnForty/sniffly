@@ -481,8 +481,9 @@ contains
     if (is_scan_active()) then
       call sniffly_update_status("Cancelling scan...")
       call stop_progressive_scan()
-      ! Update button state (will be disabled after scan stops)
+      ! Update button states (cancel button disabled, back/forward re-enabled if history exists)
       call update_cancel_scan_button_state()
+      call update_history_buttons()
       call sniffly_update_status("Scan cancelled")
     end if
   end subroutine on_cancel_scan_clicked
@@ -627,22 +628,36 @@ contains
   ! Helper: Update Back/Forward button states
   subroutine update_history_buttons()
     use gtk, only: gtk_widget_set_sensitive
+    use progressive_scanner, only: is_scan_active
+    logical :: scan_active
 
     ! Guard against accessing widgets during shutdown
     if (app_is_shutting_down) return
     if (.not. c_associated(back_btn_ptr) .or. .not. c_associated(forward_btn_ptr)) return
 
-    ! Enable Back if we're not at the start of history
-    if (nav_history_pos > 1) then
+    ! Check if scan is active - disable buttons during scan
+    scan_active = is_scan_active()
+
+    print *, "DEBUG: update_history_buttons() called"
+    print *, "DEBUG:   nav_history_pos =", nav_history_pos
+    print *, "DEBUG:   nav_history_count =", nav_history_count
+    print *, "DEBUG:   scan_active =", scan_active
+
+    ! Enable Back if we're not at the start of history AND scan is not active
+    if (nav_history_pos > 1 .and. .not. scan_active) then
+      print *, "DEBUG:   Enabling Back button"
       call gtk_widget_set_sensitive(back_btn_ptr, 1_c_int)
     else
+      print *, "DEBUG:   Disabling Back button"
       call gtk_widget_set_sensitive(back_btn_ptr, 0_c_int)
     end if
 
-    ! Enable Forward if we're not at the end of history
-    if (nav_history_pos > 0 .and. nav_history_pos < nav_history_count) then
+    ! Enable Forward if we're not at the end of history AND scan is not active
+    if (nav_history_pos > 0 .and. nav_history_pos < nav_history_count .and. .not. scan_active) then
+      print *, "DEBUG:   Enabling Forward button"
       call gtk_widget_set_sensitive(forward_btn_ptr, 1_c_int)
     else
+      print *, "DEBUG:   Disabling Forward button"
       call gtk_widget_set_sensitive(forward_btn_ptr, 0_c_int)
     end if
   end subroutine update_history_buttons
@@ -753,10 +768,20 @@ contains
   ! Callback when Up to Parent button is clicked
   subroutine on_up_clicked(button, user_data) bind(c)
     use treemap_renderer, only: navigate_up
+    use gtk, only: gtk_widget_queue_draw
     type(c_ptr), value :: button, user_data
 
     ! Use the existing navigate_up functionality from treemap_renderer
     call navigate_up()
+
+    ! Update breadcrumbs and history
+    call breadcrumb_callback()
+
+    ! Trigger redraw
+    if (c_associated(main_window_ptr)) then
+      call gtk_widget_queue_draw(main_window_ptr)
+    end if
+
     call sniffly_update_status("Navigated to parent directory")
   end subroutine on_up_clicked
 
@@ -1251,9 +1276,8 @@ contains
       ! Navigate up by the specified number of levels
       call navigate_up(levels_to_go_up)
 
-      ! Update UI
-      call sniffly_update_breadcrumbs()
-      call sniffly_update_status_bar_stats()
+      ! Update breadcrumbs and history
+      call breadcrumb_callback()
 
       ! Redraw treemap
       widget = get_widget_ptr()
@@ -1267,7 +1291,16 @@ contains
 
   ! Callback wrapper for navigation events (no arguments)
   subroutine breadcrumb_callback()
-    use treemap_renderer, only: get_breadcrumb_path
+    use treemap_renderer, only: get_breadcrumb_path, get_current_view_node
+    use types, only: file_node
+    type(file_node), pointer :: current_view
+
+    ! Sync global_scan_path with the current view node's path
+    current_view => get_current_view_node()
+    if (associated(current_view) .and. allocated(current_view%path)) then
+      global_scan_path = trim(current_view%path)
+      print *, "DEBUG: Synced global_scan_path to: ", trim(global_scan_path)
+    end if
 
     call sniffly_update_breadcrumbs()
     call sniffly_update_status_bar_stats()
@@ -1276,11 +1309,15 @@ contains
     if (.not. suppress_history_add) then
       if (len_trim(global_scan_path) > 0) then
         call add_to_history(global_scan_path)
+        print *, "DEBUG: Added to history: ", trim(global_scan_path)
       end if
     end if
 
     ! Reset suppression flag for next navigation
     suppress_history_add = .false.
+
+    ! Update button states now that history may have changed
+    call update_history_buttons()
   end subroutine breadcrumb_callback
 
   ! Show progress bar (now just resets to prepare for updates)
@@ -1415,6 +1452,10 @@ contains
     ! Update cancel button (scan is done, should be disabled and grey)
     print *, "=== UPDATING CANCEL BUTTON FROM COMPLETION CALLBACK ==="
     call update_cancel_scan_button_state()
+
+    ! Re-enable back/forward buttons if there's history
+    print *, "=== RE-ENABLING NAVIGATION BUTTONS ==="
+    call update_history_buttons()
   end subroutine scan_complete_callback_wrapper
 
   ! Trigger a rescan of the given directory (for UI buttons)
@@ -1453,8 +1494,9 @@ contains
     call scan_directory(normalized_path)
     print *, "=== RETURNED FROM scan_directory ==="
 
-    ! Update cancel button state (scan just started, should be enabled and red)
+    ! Update button states (cancel button enabled, navigation disabled during scan)
     call update_cancel_scan_button_state()
+    call update_history_buttons()
 
     ! Process events after scan to update UI
     do i = 1, 10
