@@ -91,6 +91,7 @@ layout_sources = [
 
 gui_sources = [
   # GTK4 interface
+  'src/gui/tab_manager.f90',       # Tab state management (only depends on types)
   'src/gui/treemap_widget.f90',    # Must come before gtk_app (dependency)
   'src/gui/breadcrumb_widget.f90',  # Must come before gtk_app (dependency)
   'src/gui/gtk_app.f90',
