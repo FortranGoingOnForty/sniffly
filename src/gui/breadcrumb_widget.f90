@@ -15,7 +15,8 @@ module breadcrumb_widget
   private
 
   public :: create_breadcrumb_widget, update_breadcrumb_cache, &
-            set_navigation_callback, get_breadcrumb_widget_ptr
+            set_navigation_callback, get_breadcrumb_widget_ptr, &
+            get_previous_breadcrumb_path, clear_previous_breadcrumb_path
 
   ! Callback interface for navigation events
   abstract interface
@@ -53,6 +54,9 @@ module breadcrumb_widget
 
   ! Navigation callback (called when user clicks a segment)
   procedure(navigation_callback), pointer, save :: nav_callback => null()
+
+  ! Previous path before breadcrumb navigation (for lookahead detection)
+  character(len=512), save :: previous_breadcrumb_path = ""
 
 contains
 
@@ -338,18 +342,34 @@ contains
       ! Update offset
       x_offset = x_offset + text_width
 
-      ! Draw separator (if not last segment and not after root "/")
+      ! Draw separator (if not last segment)
       if (i < cached_segment_count) then
-        ! Skip separator after root "/" segment
-        if (i /= 1 .or. trim(cached_segment_names(1)) /= "/") then
-          ! Set separator color (gray)
-          call cairo_set_source_rgb(cr, 0.5_c_double, 0.5_c_double, 0.5_c_double)
+        ! Skip separator after root "/" since it already contains the slash
+        if (trim(cached_segment_names(i)) /= "/") then
+          ! Set separator color (black to distinguish from colored segment text)
+          call cairo_set_source_rgb(cr, 0.0_c_double, 0.0_c_double, 0.0_c_double)
           font_desc = pango_font_description_from_string("Sans 11"//c_null_char)
           call pango_layout_set_font_description(layout, font_desc)
           call pango_font_description_free(font_desc)
 
-          call pango_layout_set_text(layout, trim(separator)//c_null_char, &
-                                      int(len_trim(separator), c_int))
+          ! Don't trim separator to preserve both leading and trailing spaces
+          call pango_layout_set_text(layout, separator//c_null_char, &
+                                      int(len(separator), c_int))
+          call pango_layout_get_pixel_size(layout, c_loc(text_width), c_loc(text_height))
+          call cairo_move_to(cr, real(x_offset, c_double), &
+                             real((height - text_height) / 2, c_double))
+          call pango_cairo_show_layout(cr, layout)
+
+          x_offset = x_offset + text_width
+        else
+          ! After root "/", just add a space (no slash separator since root already has it)
+          ! Set separator color (black)
+          call cairo_set_source_rgb(cr, 0.0_c_double, 0.0_c_double, 0.0_c_double)
+          font_desc = pango_font_description_from_string("Sans 11"//c_null_char)
+          call pango_layout_set_font_description(layout, font_desc)
+          call pango_font_description_free(font_desc)
+
+          call pango_layout_set_text(layout, " "//c_null_char, 1_c_int)
           call pango_layout_get_pixel_size(layout, c_loc(text_width), c_loc(text_height))
           call cairo_move_to(cr, real(x_offset, c_double), &
                              real((height - text_height) / 2, c_double))
@@ -362,10 +382,25 @@ contains
 
     ! Draw forward lookahead segments (greyed out)
     do i = 1, cached_forward_segment_count
-      ! Check if this forward segment is hovered
+      ! Draw separator before forward segment (black, but with transparency for lookahead)
+      call cairo_set_source_rgba(cr, 0.0_c_double, 0.0_c_double, 0.0_c_double, 0.5_c_double)
+      font_desc = pango_font_description_from_string("Sans 11"//c_null_char)
+      call pango_layout_set_font_description(layout, font_desc)
+      call pango_font_description_free(font_desc)
+
+      ! Don't trim separator to preserve both leading and trailing spaces
+      call pango_layout_set_text(layout, separator//c_null_char, &
+                                  int(len(separator), c_int))
+      call pango_layout_get_pixel_size(layout, c_loc(text_width), c_loc(text_height))
+      call cairo_move_to(cr, real(x_offset, c_double), &
+                         real((height - text_height) / 2, c_double))
+      call pango_cairo_show_layout(cr, layout)
+      x_offset = x_offset + text_width
+
+      ! Set color for forward segment based on hover state
       if (cached_segment_count + i == hovered_segment) then
-        ! Hovered forward segment: darker grey
-        call cairo_set_source_rgba(cr, 0.3_c_double, 0.3_c_double, 0.3_c_double, 0.7_c_double)
+        ! Hovered forward segment: same dark grey as regular segments (full opacity)
+        call cairo_set_source_rgb(cr, 0.3_c_double, 0.3_c_double, 0.3_c_double)
       else
         ! Normal forward segment: lighter grey with transparency
         call cairo_set_source_rgba(cr, 0.5_c_double, 0.5_c_double, 0.5_c_double, 0.5_c_double)
@@ -374,20 +409,6 @@ contains
       font_desc = pango_font_description_from_string("Sans 11"//c_null_char)
       call pango_layout_set_font_description(layout, font_desc)
       call pango_font_description_free(font_desc)
-
-      ! Draw separator before forward segment
-      call cairo_set_source_rgba(cr, 0.5_c_double, 0.5_c_double, 0.5_c_double, 0.5_c_double)
-      font_desc = pango_font_description_from_string("Sans 11"//c_null_char)
-      call pango_layout_set_font_description(layout, font_desc)
-      call pango_font_description_free(font_desc)
-
-      call pango_layout_set_text(layout, trim(separator)//c_null_char, &
-                                  int(len_trim(separator), c_int))
-      call pango_layout_get_pixel_size(layout, c_loc(text_width), c_loc(text_height))
-      call cairo_move_to(cr, real(x_offset, c_double), &
-                         real((height - text_height) / 2, c_double))
-      call pango_cairo_show_layout(cr, layout)
-      x_offset = x_offset + text_width
 
       ! Draw forward segment name
       call pango_layout_set_text(layout, trim(cached_forward_segment_names(i))//c_null_char, &
@@ -438,18 +459,30 @@ contains
     integer :: clicked_segment, total_segments
     type(file_node), pointer :: current_view
     character(len=:), allocatable :: target_path
+    character(len=512) :: current_path
 
     ! Find which segment was clicked
     clicked_segment = find_segment_at_position(x, y)
     total_segments = cached_segment_count + cached_forward_segment_count
 
     if (clicked_segment > 0 .and. clicked_segment <= total_segments) then
+      ! Save current path before navigation (for lookahead detection)
+      current_view => get_current_view_node()
+      if (associated(current_view) .and. allocated(current_view%path)) then
+        current_path = trim(current_view%path)
+        previous_breadcrumb_path = current_path
+        print *, "Saved previous breadcrumb path: ", trim(previous_breadcrumb_path)
+      else
+        previous_breadcrumb_path = ""
+      end if
+
       ! Check if it's a regular segment or forward segment
       if (clicked_segment <= cached_segment_count) then
         ! Regular segment clicked
         ! Don't navigate if clicking the active (last) segment
         if (clicked_segment == cached_segment_count .and. cached_forward_segment_count == 0) then
           print *, "Clicked active segment - no navigation"
+          previous_breadcrumb_path = ""  ! Clear since no navigation
           return
         end if
 
@@ -468,7 +501,7 @@ contains
       end if
 
       print *, "Navigating to: ", target_path
-      print *, "  (breadcrumb navigation - should preserve forward context)"
+      print *, "  (breadcrumb navigation - checking for lookahead)"
 
       ! Scan the target directory
       ! This will update the current view and trigger callbacks
@@ -483,6 +516,17 @@ contains
       call queue_redraw()
     end if
   end subroutine on_breadcrumb_click
+
+  ! Get the previous breadcrumb path (before navigation)
+  function get_previous_breadcrumb_path() result(path)
+    character(len=512) :: path
+    path = previous_breadcrumb_path
+  end function get_previous_breadcrumb_path
+
+  ! Clear the previous breadcrumb path
+  subroutine clear_previous_breadcrumb_path()
+    previous_breadcrumb_path = ""
+  end subroutine clear_previous_breadcrumb_path
 
   ! Helper: Find which segment is at given position
   function find_segment_at_position(x, y) result(segment_index)
