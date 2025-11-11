@@ -68,7 +68,6 @@ module gtk_app
   character(len=512), dimension(MAX_HISTORY), save :: nav_history
   integer, save :: nav_history_count = 0
   integer, save :: nav_history_pos = 0  ! Current position in history (0 = no history)
-  logical, save :: suppress_history_add = .false.  ! Flag to prevent adding to history during Back/Forward
 
   ! Button pointers for enabling/disabling
   type(c_ptr), save :: back_btn_ptr = c_null_ptr
@@ -674,17 +673,24 @@ contains
     ! Check if scan is active - disable buttons during scan
     scan_active = is_scan_active()
 
+    print *, "=== UPDATE_HISTORY_BUTTONS ==="
+    print *, "  pos=", nav_history_pos, " count=", nav_history_count, " scan_active=", scan_active
+
     ! Enable Back if we're not at the start of history AND scan is not active
     if (nav_history_pos > 1 .and. .not. scan_active) then
+      print *, "  Enabling Back (pos > 1 and scan not active)"
       call gtk_widget_set_sensitive(back_btn_ptr, 1_c_int)
     else
+      print *, "  Disabling Back (pos=", nav_history_pos, " or scan active)"
       call gtk_widget_set_sensitive(back_btn_ptr, 0_c_int)
     end if
 
     ! Enable Forward if we're not at the end of history AND scan is not active
     if (nav_history_pos > 0 .and. nav_history_pos < nav_history_count .and. .not. scan_active) then
+      print *, "  Enabling Forward (pos < count and scan not active)"
       call gtk_widget_set_sensitive(forward_btn_ptr, 1_c_int)
     else
+      print *, "  Disabling Forward (pos=", nav_history_pos, " count=", nav_history_count, " or scan active)"
       call gtk_widget_set_sensitive(forward_btn_ptr, 0_c_int)
     end if
   end subroutine update_history_buttons
@@ -748,15 +754,32 @@ contains
     character(len=*), intent(in) :: path
     integer :: i
 
+    print *, "=== ADD_TO_HISTORY CALLED ==="
+    print *, "  Path: ", trim(path)
+    print *, "  Before: pos=", nav_history_pos, " count=", nav_history_count
+    if (nav_history_count > 0) then
+      print *, "  Current history:"
+      do i = 1, nav_history_count
+        if (i == nav_history_pos) then
+          print *, "    [", i, "] (CURRENT) ", trim(nav_history(i))
+        else
+          print *, "    [", i, "] ", trim(nav_history(i))
+        end if
+      end do
+    end if
+
     ! Don't add if it's the same as current position
     if (nav_history_pos > 0 .and. nav_history_pos <= nav_history_count) then
       if (trim(nav_history(nav_history_pos)) == trim(path)) then
+        print *, "  Path same as current position - not adding"
         return
       end if
     end if
 
     ! If we're in the middle of history, discard forward history
     if (nav_history_pos > 0 .and. nav_history_pos < nav_history_count) then
+      print *, "  In middle of history - truncating forward history"
+      print *, "  Truncating count from", nav_history_count, "to", nav_history_pos
       nav_history_count = nav_history_pos
     end if
 
@@ -764,8 +787,10 @@ contains
     if (nav_history_count < MAX_HISTORY) then
       nav_history_count = nav_history_count + 1
       nav_history(nav_history_count) = trim(path)
+      print *, "  Added to history at position", nav_history_count
     else
       ! Shift history left and add at end
+      print *, "  History full - shifting left"
       do i = 1, MAX_HISTORY - 1
         nav_history(i) = nav_history(i + 1)
       end do
@@ -773,6 +798,8 @@ contains
     end if
 
     nav_history_pos = nav_history_count
+    print *, "  After: pos=", nav_history_pos, " count=", nav_history_count
+    print *, "=== END ADD_TO_HISTORY ==="
     call update_history_buttons()
   end subroutine add_to_history
 
@@ -780,6 +807,9 @@ contains
   subroutine on_back_clicked(button, user_data) bind(c)
     use progressive_scanner, only: is_scan_active
     type(c_ptr), value :: button, user_data
+
+    print *, "=== BACK BUTTON CLICKED ==="
+    print *, "  Before: pos=", nav_history_pos, " count=", nav_history_count
 
     ! Block navigation if scan is active
     if (is_scan_active()) then
@@ -790,7 +820,8 @@ contains
     if (nav_history_pos > 1) then
       nav_history_pos = nav_history_pos - 1
       global_scan_path = trim(nav_history(nav_history_pos))
-      suppress_history_add = .true.  ! Prevent adding to history during Back navigation
+      print *, "  Moving back to pos=", nav_history_pos
+      print *, "  Path: ", trim(global_scan_path)
       call set_scan_path(trim(global_scan_path))
       call update_path_entry(trim(global_scan_path))
       call trigger_rescan(global_scan_path)
@@ -804,6 +835,9 @@ contains
     use progressive_scanner, only: is_scan_active
     type(c_ptr), value :: button, user_data
 
+    print *, "=== FORWARD BUTTON CLICKED ==="
+    print *, "  Before: pos=", nav_history_pos, " count=", nav_history_count
+
     ! Block navigation if scan is active
     if (is_scan_active()) then
       call sniffly_update_status("Cannot navigate: Scan in progress")
@@ -813,7 +847,8 @@ contains
     if (nav_history_pos > 0 .and. nav_history_pos < nav_history_count) then
       nav_history_pos = nav_history_pos + 1
       global_scan_path = trim(nav_history(nav_history_pos))
-      suppress_history_add = .true.  ! Prevent adding to history during Forward navigation
+      print *, "  Moving forward to pos=", nav_history_pos
+      print *, "  Path: ", trim(global_scan_path)
       call set_scan_path(trim(global_scan_path))
       call update_path_entry(trim(global_scan_path))
       call trigger_rescan(global_scan_path)
@@ -1352,24 +1387,24 @@ contains
     use types, only: file_node
     type(file_node), pointer :: current_view
 
+    print *, "=== BREADCRUMB_CALLBACK ==="
+
     ! Sync global_scan_path with the current view node's path
     current_view => get_current_view_node()
     if (associated(current_view) .and. allocated(current_view%path)) then
       global_scan_path = trim(current_view%path)
+      print *, "  Synced global_scan_path to: ", trim(global_scan_path)
     end if
 
     call sniffly_update_breadcrumbs()
     call sniffly_update_status_bar_stats()
 
-    ! Add current path to navigation history (unless suppressed by Back/Forward)
-    if (.not. suppress_history_add) then
-      if (len_trim(global_scan_path) > 0) then
-        call add_to_history(global_scan_path)
-      end if
+    ! Always add current path to navigation history
+    ! (add_to_history has duplicate detection built-in)
+    if (len_trim(global_scan_path) > 0) then
+      print *, "  Calling add_to_history..."
+      call add_to_history(global_scan_path)
     end if
-
-    ! Reset suppression flag for next navigation
-    suppress_history_add = .false.
 
     ! Update button states now that history may have changed
     call update_history_buttons()
