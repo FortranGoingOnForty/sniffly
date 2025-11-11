@@ -64,6 +64,7 @@ module gtk_app
   character(len=512), dimension(MAX_HISTORY), save :: nav_history
   integer, save :: nav_history_count = 0
   integer, save :: nav_history_pos = 0  ! Current position in history (0 = no history)
+  logical, save :: navigating_history = .false.  ! Flag: are we using back/forward?
 
   ! Button pointers for enabling/disabling
   type(c_ptr), save :: back_btn_ptr = c_null_ptr
@@ -1277,11 +1278,15 @@ contains
 
     call sniffly_update_status_bar_stats()
 
-    ! Always add current path to navigation history
-    ! (add_to_history has duplicate detection built-in)
-    if (len_trim(global_scan_path) > 0) then
-      print *, "  Calling add_to_history..."
-      call add_to_history(global_scan_path)
+    ! Add to history ONLY if this is a new navigation (not back/forward)
+    if (.not. navigating_history) then
+      if (len_trim(global_scan_path) > 0) then
+        print *, "  Calling add_to_history (new navigation)..."
+        call add_to_history(global_scan_path)
+      end if
+    else
+      print *, "  Skipping add_to_history (history navigation)"
+      navigating_history = .false.  ! Reset flag
     end if
 
     ! Update button states now that history may have changed
