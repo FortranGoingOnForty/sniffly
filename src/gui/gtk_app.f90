@@ -140,8 +140,9 @@ contains
   ! Set the directory path to scan (call before sniffly_app_run)
   subroutine sniffly_set_scan_path(path)
     character(len=*), intent(in) :: path
+    ! Store in legacy global for now - will be used to create first tab in on_activate
     global_scan_path = trim(path)
-    print *, "Scan path set to: ", trim(global_scan_path)
+    print *, "Initial scan path set to: ", trim(global_scan_path)
   end subroutine sniffly_set_scan_path
 
   ! Callback when window close button (X) is clicked
@@ -1480,35 +1481,44 @@ contains
     use treemap_renderer, only: get_current_view_node
     use types, only: file_node
     type(file_node), pointer :: current_view
+    type(tab_state), pointer :: tab
     character(len=512) :: fwd_path, prev_breadcrumb_path
     integer :: i, matched_pos, current_len
     logical :: was_navigating_history, is_breadcrumb_lookahead
 
     print *, "=== BREADCRUMB_CALLBACK ==="
-    print *, "  navigating_history flag at entry: ", navigating_history
+
+    ! Get active tab
+    tab => get_active_tab()
+    if (.not. associated(tab)) then
+      print *, "ERROR: No active tab in breadcrumb_callback"
+      return
+    end if
+
+    print *, "  navigating_history flag at entry: ", tab%navigating_history
 
     ! Initialize variables
     fwd_path = ""
     is_breadcrumb_lookahead = .false.
 
     ! Save flag state
-    was_navigating_history = navigating_history
+    was_navigating_history = tab%navigating_history
 
-    ! Sync global_scan_path with the current view node's path
+    ! Sync tab scan_path with the current view node's path
     current_view => get_current_view_node()
     if (associated(current_view) .and. allocated(current_view%path)) then
-      global_scan_path = trim(current_view%path)
-      print *, "  Synced global_scan_path to: ", trim(global_scan_path)
-      print *, "  Current nav_history_pos: ", nav_history_pos, " nav_history_count: ", nav_history_count
+      tab%scan_path = trim(current_view%path)
+      print *, "  Synced tab scan_path to: ", trim(tab%scan_path)
+      print *, "  Current nav_history_pos: ", tab%nav_history_pos, " nav_history_count: ", tab%nav_history_count
 
       ! Check for breadcrumb-based lookahead first (when clicking up in breadcrumb)
       prev_breadcrumb_path = get_previous_breadcrumb_path()
       if (len_trim(prev_breadcrumb_path) > 0) then
         print *, "  Previous breadcrumb path: ", trim(prev_breadcrumb_path)
         ! Check if current path is a prefix of previous path (navigating up)
-        current_len = len_trim(global_scan_path)
+        current_len = len_trim(tab%scan_path)
         if (len_trim(prev_breadcrumb_path) > current_len) then
-          if (prev_breadcrumb_path(1:current_len) == global_scan_path(1:current_len)) then
+          if (prev_breadcrumb_path(1:current_len) == tab%scan_path(1:current_len)) then
             ! We navigated to a parent directory via breadcrumb
             fwd_path = trim(prev_breadcrumb_path)
             is_breadcrumb_lookahead = .true.
@@ -1525,20 +1535,20 @@ contains
       ! Check if this path matches any entry in history (for breadcrumb clicks)
       ! This syncs nav_history_pos with breadcrumb navigation
       ! Only do this if we're NOT already in a history navigation (back/forward button)
-      if (.not. was_navigating_history .and. nav_history_count > 0) then
+      if (.not. was_navigating_history .and. tab%nav_history_count > 0) then
         matched_pos = 0
-        do i = 1, nav_history_count
-          if (trim(nav_history(i)) == trim(global_scan_path)) then
+        do i = 1, tab%nav_history_count
+          if (trim(tab%nav_history(i)) == trim(tab%scan_path)) then
             matched_pos = i
             print *, "  Found path in history at position ", i
             exit
           end if
         end do
 
-        if (matched_pos > 0 .and. matched_pos /= nav_history_pos) then
-          print *, "  Breadcrumb navigation: syncing history pos from ", nav_history_pos, " to ", matched_pos
-          nav_history_pos = matched_pos
-          navigating_history = .true.  ! Mark as history navigation to skip add_to_history
+        if (matched_pos > 0 .and. matched_pos /= tab%nav_history_pos) then
+          print *, "  Breadcrumb navigation: syncing history pos from ", tab%nav_history_pos, " to ", matched_pos
+          tab%nav_history_pos = matched_pos
+          tab%navigating_history = .true.  ! Mark as history navigation to skip add_to_history
         else if (matched_pos > 0) then
           print *, "  Path matches current history position - no sync needed"
         else
@@ -1569,14 +1579,14 @@ contains
     ! Add to history if this is a new navigation
     ! Skip only if: (1) using back/forward buttons OR (2) history-based forward path exists
     ! BUT: breadcrumb-based lookahead IS a new navigation and should be added!
-    if (.not. navigating_history .and. (len_trim(fwd_path) == 0 .or. is_breadcrumb_lookahead)) then
+    if (.not. tab%navigating_history .and. (len_trim(fwd_path) == 0 .or. is_breadcrumb_lookahead)) then
       ! New navigation (including breadcrumb navigation with lookahead)
-      if (len_trim(global_scan_path) > 0) then
+      if (len_trim(tab%scan_path) > 0) then
         print *, "  Calling add_to_history (new navigation, breadcrumb_lookahead=", is_breadcrumb_lookahead, ")"
-        call add_to_history(global_scan_path)
+        call add_to_history(tab%scan_path)
       end if
     else
-      if (navigating_history) then
+      if (tab%navigating_history) then
         print *, "  Skipping add_to_history (history navigation mode)"
       else
         print *, "  Skipping add_to_history (history-based forward context exists)"
@@ -1585,7 +1595,7 @@ contains
 
     ! ALWAYS reset the flag at the end (ensure it doesn't stick)
     print *, "  Resetting navigating_history flag to false"
-    navigating_history = .false.
+    tab%navigating_history = .false.
 
     ! Update button states now that history may have changed
     call update_history_buttons()
