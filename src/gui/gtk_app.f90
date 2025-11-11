@@ -817,53 +817,62 @@ contains
   ! Helper: Add path to navigation history
   subroutine add_to_history(path)
     character(len=*), intent(in) :: path
+    type(tab_state), pointer :: tab
     integer :: i
 
     print *, "=== ADD_TO_HISTORY CALLED ==="
     print *, "  Path: ", trim(path)
-    print *, "  Before: pos=", nav_history_pos, " count=", nav_history_count
-    if (nav_history_count > 0) then
+
+    ! Get active tab
+    tab => get_active_tab()
+    if (.not. associated(tab)) then
+      print *, "ERROR: No active tab in add_to_history"
+      return
+    end if
+
+    print *, "  Before: pos=", tab%nav_history_pos, " count=", tab%nav_history_count
+    if (tab%nav_history_count > 0) then
       print *, "  Current history:"
-      do i = 1, nav_history_count
-        if (i == nav_history_pos) then
-          print *, "    [", i, "] (CURRENT) ", trim(nav_history(i))
+      do i = 1, tab%nav_history_count
+        if (i == tab%nav_history_pos) then
+          print *, "    [", i, "] (CURRENT) ", trim(tab%nav_history(i))
         else
-          print *, "    [", i, "] ", trim(nav_history(i))
+          print *, "    [", i, "] ", trim(tab%nav_history(i))
         end if
       end do
     end if
 
     ! Don't add if it's the same as current position
-    if (nav_history_pos > 0 .and. nav_history_pos <= nav_history_count) then
-      if (trim(nav_history(nav_history_pos)) == trim(path)) then
+    if (tab%nav_history_pos > 0 .and. tab%nav_history_pos <= tab%nav_history_count) then
+      if (trim(tab%nav_history(tab%nav_history_pos)) == trim(path)) then
         print *, "  Path same as current position - not adding"
         return
       end if
     end if
 
     ! If we're in the middle of history, discard forward history
-    if (nav_history_pos > 0 .and. nav_history_pos < nav_history_count) then
+    if (tab%nav_history_pos > 0 .and. tab%nav_history_pos < tab%nav_history_count) then
       print *, "  In middle of history - truncating forward history"
-      print *, "  Truncating count from", nav_history_count, "to", nav_history_pos
-      nav_history_count = nav_history_pos
+      print *, "  Truncating count from", tab%nav_history_count, "to", tab%nav_history_pos
+      tab%nav_history_count = tab%nav_history_pos
     end if
 
     ! Add to history
-    if (nav_history_count < MAX_HISTORY) then
-      nav_history_count = nav_history_count + 1
-      nav_history(nav_history_count) = trim(path)
-      print *, "  Added to history at position", nav_history_count
+    if (tab%nav_history_count < MAX_HISTORY) then
+      tab%nav_history_count = tab%nav_history_count + 1
+      tab%nav_history(tab%nav_history_count) = trim(path)
+      print *, "  Added to history at position", tab%nav_history_count
     else
       ! Shift history left and add at end
       print *, "  History full - shifting left"
       do i = 1, MAX_HISTORY - 1
-        nav_history(i) = nav_history(i + 1)
+        tab%nav_history(i) = tab%nav_history(i + 1)
       end do
-      nav_history(MAX_HISTORY) = trim(path)
+      tab%nav_history(MAX_HISTORY) = trim(path)
     end if
 
-    nav_history_pos = nav_history_count
-    print *, "  After: pos=", nav_history_pos, " count=", nav_history_count
+    tab%nav_history_pos = tab%nav_history_count
+    print *, "  After: pos=", tab%nav_history_pos, " count=", tab%nav_history_count
     print *, "=== END ADD_TO_HISTORY ==="
     call update_history_buttons()
   end subroutine add_to_history
@@ -1468,10 +1477,19 @@ contains
 
   ! Get forward path (if we navigated backwards and there's a forward history)
   function get_forward_path() result(fwd_path)
+    type(tab_state), pointer :: tab
     character(len=512) :: fwd_path
+
     fwd_path = ""
-    if (nav_history_pos > 0 .and. nav_history_pos < nav_history_count) then
-      fwd_path = trim(nav_history(nav_history_pos + 1))
+
+    ! Get active tab
+    tab => get_active_tab()
+    if (.not. associated(tab)) then
+      return
+    end if
+
+    if (tab%nav_history_pos > 0 .and. tab%nav_history_pos < tab%nav_history_count) then
+      fwd_path = trim(tab%nav_history(tab%nav_history_pos + 1))
       print *, "Forward path available: ", trim(fwd_path)
     end if
   end function get_forward_path
