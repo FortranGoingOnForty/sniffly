@@ -18,7 +18,8 @@ module gtk_app
                  gtk_entry_new, gtk_entry_buffer_set_text, gtk_entry_get_buffer, &
                  gtk_editable_set_editable, gtk_editable_get_text, &
                  gtk_entry_set_placeholder_text, gtk_widget_add_css_class, &
-                 gtk_widget_remove_css_class
+                 gtk_widget_remove_css_class, gtk_css_provider_new, &
+                 gtk_css_provider_load_from_string, gtk_style_context_add_provider_for_display
   use gdk, only: gdk_display_get_default, gdk_display_get_clipboard, gdk_clipboard_set_text
   use g, only: g_application_run, g_idle_add, g_timeout_add_seconds_once
   use treemap_widget, only: create_treemap_widget, set_scan_path, register_navigation_callback, &
@@ -31,8 +32,9 @@ module gtk_app
   use treemap_renderer, only: register_progress_callback, scan_directory, set_redraw_widget, &
                                register_scan_completion_callback
   use tab_manager, only: tab_state, init_tab_manager, create_tab, get_active_tab, &
-                         switch_to_tab, num_tabs, active_tab_index
-  use tab_widget, only: create_tab_bar, refresh_tab_bar, register_tab_switch_callback
+                         switch_to_tab, num_tabs, active_tab_index, get_path_basename
+  use tab_widget, only: create_tab_bar, refresh_tab_bar, register_tab_switch_callback, &
+                        update_tab_visual_states
   implicit none
   private
 
@@ -478,6 +480,9 @@ contains
     ! Register keyboard handler on window (not widget) for global keyboard capture
     call register_key_handler(main_window_ptr)
 
+    ! Load custom CSS (including pulsing animation for suggested-action)
+    call load_custom_css()
+
     ! Show the window first with "Scanning..." status
     call gtk_window_present(main_window_ptr)
 
@@ -490,6 +495,37 @@ contains
     print *, "Sniffly started successfully! Scan will begin shortly..."
     print *, "Window size: ", DEFAULT_WIDTH, "x", DEFAULT_HEIGHT
   end subroutine on_activate
+
+  ! Load custom CSS for animations and styling
+  subroutine load_custom_css()
+    type(c_ptr) :: css_provider, display
+    character(len=:), allocatable :: css_data
+
+    ! CSS with pulsing animation for suggested-action class (empty tabs)
+    css_data = &
+      "@keyframes pulse { " // &
+      "0% { opacity: 1.0; } " // &
+      "50% { opacity: 0.5; } " // &
+      "100% { opacity: 1.0; } " // &
+      "} " // &
+      ".suggested-action { " // &
+      "animation: pulse 1.5s ease-in-out infinite; " // &
+      "}"
+
+    ! Create CSS provider
+    css_provider = gtk_css_provider_new()
+
+    ! Load CSS from string
+    call gtk_css_provider_load_from_string(css_provider, trim(css_data)//c_null_char)
+
+    ! Get default display
+    display = gdk_display_get_default()
+
+    ! Add CSS provider to display (600 = GTK_STYLE_PROVIDER_PRIORITY_APPLICATION)
+    call gtk_style_context_add_provider_for_display(display, css_provider, 600_c_int)
+
+    print *, "Custom CSS loaded (pulsing animation for empty tabs)"
+  end subroutine load_custom_css
 
   ! Callback when Open Directory button is clicked
   ! NOTE: Uses system command for file picking until GTK4 file dialog bindings are available
@@ -913,6 +949,11 @@ contains
 
       ! Update status bar to guide user
       call sniffly_update_status("No directory selected - click the folder icon to choose a directory")
+
+      ! Clear the treemap drawing (redraw with no data will show blank)
+      if (c_associated(drawing_area_ptr)) then
+        call gtk_widget_queue_draw(drawing_area_ptr)
+      end if
 
       return
     end if
@@ -1687,7 +1728,12 @@ contains
     current_view => get_current_view_node()
     if (associated(current_view) .and. allocated(current_view%path)) then
       tab%scan_path = trim(current_view%path)
+
+      ! Update tab label to reflect new path
+      tab%label = get_path_basename(trim(tab%scan_path))
+
       print *, "  Synced tab scan_path to: ", trim(tab%scan_path)
+      print *, "  Updated tab label to: ", trim(tab%label)
       print *, "  Current nav_history_pos: ", tab%nav_history_pos, " nav_history_count: ", tab%nav_history_count
 
       ! Check for breadcrumb-based lookahead first (when clicking up in breadcrumb)
@@ -1778,6 +1824,10 @@ contains
 
     ! Update button states now that history may have changed
     call update_history_buttons()
+
+    ! Refresh tab bar to show updated label
+    call refresh_tab_bar()
+    call update_tab_visual_states()
   end subroutine breadcrumb_callback
 
   ! Show progress bar (now just resets to prepare for updates)
