@@ -53,6 +53,9 @@ module gtk_app
   type(c_ptr), dimension(MAX_BREADCRUMB_SEGMENTS), save :: breadcrumb_buttons = c_null_ptr
   integer, save :: breadcrumb_count = 0
 
+  ! Shutdown flag - set when app is closing to prevent widget access
+  logical, save :: app_is_shutting_down = .false.
+
   ! Global scan path (can be set via command line)
   character(len=512), save :: global_scan_path = ""
 
@@ -102,12 +105,25 @@ contains
   ! Quit the application
   subroutine sniffly_app_quit()
     use progressive_scanner, only: stop_progressive_scan
+    ! Set shutdown flag first to prevent callbacks from accessing widgets
+    app_is_shutting_down = .true.
+
     ! Stop any active scans before destroying window
     call stop_progressive_scan()
+
     if (c_associated(main_window_ptr)) then
       call gtk_window_destroy(main_window_ptr)
-      main_window_ptr = c_null_ptr
     end if
+
+    ! Nullify all widget pointers to prevent access after destruction
+    main_window_ptr = c_null_ptr
+    status_label_ptr = c_null_ptr
+    breadcrumb_box_ptr = c_null_ptr
+    progress_bar_ptr = c_null_ptr
+    path_entry_ptr = c_null_ptr
+    back_btn_ptr = c_null_ptr
+    forward_btn_ptr = c_null_ptr
+    breadcrumb_buttons = c_null_ptr
   end subroutine sniffly_app_quit
 
   ! Set the directory path to scan (call before sniffly_app_run)
@@ -116,6 +132,35 @@ contains
     global_scan_path = trim(path)
     print *, "Scan path set to: ", trim(global_scan_path)
   end subroutine sniffly_set_scan_path
+
+  ! Callback when window close button (X) is clicked
+  function on_window_close_request(window, user_data) bind(c) result(stop_propagation)
+    use progressive_scanner, only: stop_progressive_scan
+    type(c_ptr), value :: window, user_data
+    integer(c_int) :: stop_propagation
+
+    print *, "Window close button clicked - stopping scan and cleaning up"
+
+    ! Set shutdown flag first to prevent callbacks from accessing widgets
+    app_is_shutting_down = .true.
+
+    ! Stop any active scans
+    call stop_progressive_scan()
+
+    ! Nullify all widget pointers to prevent access after destruction
+    ! (The window will be destroyed by GTK after we return FALSE)
+    status_label_ptr = c_null_ptr
+    breadcrumb_box_ptr = c_null_ptr
+    progress_bar_ptr = c_null_ptr
+    path_entry_ptr = c_null_ptr
+    back_btn_ptr = c_null_ptr
+    forward_btn_ptr = c_null_ptr
+    breadcrumb_buttons = c_null_ptr
+    main_window_ptr = c_null_ptr
+
+    ! Return FALSE (0) to allow the window to close
+    stop_propagation = 0_c_int
+  end function on_window_close_request
 
   ! Callback when application activates (startup)
   subroutine on_activate(app, user_data) bind(c)
@@ -137,6 +182,10 @@ contains
     call gtk_window_set_default_size(main_window_ptr, &
                                       int(DEFAULT_WIDTH, c_int), &
                                       int(DEFAULT_HEIGHT, c_int))
+
+    ! Connect close-request signal to handle window close button (X)
+    call g_signal_connect(main_window_ptr, "close-request"//c_null_char, &
+                           c_funloc(on_window_close_request), c_null_ptr)
 
     ! Use global scan path or home directory
     if (len_trim(global_scan_path) > 0) then
@@ -548,6 +597,8 @@ contains
   subroutine update_history_buttons()
     use gtk, only: gtk_widget_set_sensitive
 
+    ! Guard against accessing widgets during shutdown
+    if (app_is_shutting_down) return
     if (.not. c_associated(back_btn_ptr) .or. .not. c_associated(forward_btn_ptr)) return
 
     ! Enable Back if we're not at the start of history
@@ -827,6 +878,8 @@ contains
     character(len=*), intent(in) :: path
     type(c_ptr) :: buffer
 
+    ! Guard against accessing widgets during shutdown
+    if (app_is_shutting_down) return
     if (.not. c_associated(path_entry_ptr)) return
 
     ! Get the entry buffer and set the text
@@ -940,6 +993,8 @@ contains
   ! Update status bar with scan information
   subroutine sniffly_update_status(message)
     character(len=*), intent(in) :: message
+    ! Guard against accessing widgets during shutdown
+    if (app_is_shutting_down) return
     if (c_associated(status_label_ptr)) then
       call gtk_label_set_text(status_label_ptr, trim(message)//c_null_char)
     end if
@@ -957,6 +1012,8 @@ contains
     character(len=64) :: size_str
     real :: size_kb, size_mb, size_gb
 
+    ! Guard against accessing widgets during shutdown
+    if (app_is_shutting_down) return
     if (.not. c_associated(status_label_ptr)) return
 
     ! Get current view node
@@ -1026,6 +1083,9 @@ contains
     logical :: is_home_path
     type(c_ptr) :: button, separator, child
     type(c_ptr) :: user_data_ptr
+
+    ! Guard against accessing widgets during shutdown
+    if (app_is_shutting_down) return
 
     if (.not. c_associated(breadcrumb_box_ptr)) then
       print *, "WARNING: breadcrumb_box_ptr not associated!"
@@ -1170,6 +1230,8 @@ contains
 
   ! Show progress bar (now just resets to prepare for updates)
   subroutine sniffly_show_progress()
+    ! Guard against accessing widgets during shutdown
+    if (app_is_shutting_down) return
     if (c_associated(progress_bar_ptr)) then
       call gtk_progress_bar_set_fraction(progress_bar_ptr, 0.0_c_double)
       call gtk_progress_bar_set_text(progress_bar_ptr, "0%"//c_null_char)
@@ -1178,6 +1240,8 @@ contains
 
   ! Hide progress bar (now just resets to 0%)
   subroutine sniffly_hide_progress()
+    ! Guard against accessing widgets during shutdown
+    if (app_is_shutting_down) return
     if (c_associated(progress_bar_ptr)) then
       call gtk_progress_bar_set_fraction(progress_bar_ptr, 0.0_c_double)
       call gtk_progress_bar_set_text(progress_bar_ptr, ""//c_null_char)
@@ -1192,6 +1256,9 @@ contains
     character(len=*), intent(in) :: message
     character(len=32) :: percent_str
     integer :: percent_int
+
+    ! Guard against accessing widgets during shutdown
+    if (app_is_shutting_down) return
 
     if (c_associated(progress_bar_ptr)) then
       ! Update progress bar fraction
