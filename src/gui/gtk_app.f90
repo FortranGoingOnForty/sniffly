@@ -176,7 +176,7 @@ contains
   ! Callback when application activates (startup)
   subroutine on_activate(app, user_data) bind(c)
     type(c_ptr), value :: app, user_data
-    type(c_ptr) :: drawing_area, main_box, toolbar, open_dir_btn, scan_btn, cancel_scan_btn, back_btn, forward_btn, up_btn, open_finder_btn, copy_path_btn, info_btn, toggle_dotfiles_btn, toggle_ext_btn, toggle_render_btn, delete_btn, status_bar, breadcrumb_widget, tab_bar
+    type(c_ptr) :: drawing_area, main_box, toolbar, open_dir_btn, scan_btn, cancel_scan_btn, back_btn, forward_btn, up_btn, open_finder_btn, copy_path_btn, info_btn, toggle_dotfiles_btn, toggle_ext_btn, toggle_render_btn, delete_btn, status_bar, breadcrumb_widget, breadcrumb_row, tab_bar
     character(len=512) :: scan_path
     integer(c_int) :: idle_id
     integer :: first_tab_index
@@ -365,19 +365,11 @@ contains
     call gtk_box_append(toolbar, delete_btn)
     delete_btn_ptr = delete_btn  ! Store for enabling/disabling
 
-    ! Create tab bar (on right side of toolbar)
-    tab_bar = create_tab_bar()
-    if (c_associated(tab_bar)) then
-      call gtk_box_append(toolbar, tab_bar)
-      ! Populate with tabs
-      call refresh_tab_bar()
-      print *, "Tab bar added to toolbar"
-    else
-      print *, "ERROR: Failed to create tab bar"
-    end if
-
     ! Add toolbar to main box
     call gtk_box_append(main_box, toolbar)
+
+    ! Create horizontal box for breadcrumb row (breadcrumb + tab bar)
+    breadcrumb_row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5_c_int)
 
     ! Create custom Cairo breadcrumb widget
     breadcrumb_widget = create_breadcrumb_widget()
@@ -389,8 +381,25 @@ contains
     ! Register navigation callback for breadcrumb
     call set_navigation_callback(breadcrumb_callback)
 
-    ! Add breadcrumb widget to main box
-    call gtk_box_append(main_box, breadcrumb_widget)
+    ! Make breadcrumb expand to fill space (pushes tab bar to right)
+    call gtk_widget_set_hexpand(breadcrumb_widget, 1_c_int)
+
+    ! Add breadcrumb widget to breadcrumb row
+    call gtk_box_append(breadcrumb_row, breadcrumb_widget)
+
+    ! Create tab bar (on right side of breadcrumb row)
+    tab_bar = create_tab_bar()
+    if (c_associated(tab_bar)) then
+      call gtk_box_append(breadcrumb_row, tab_bar)
+      ! Populate with tabs
+      call refresh_tab_bar()
+      print *, "Tab bar added to breadcrumb row"
+    else
+      print *, "ERROR: Failed to create tab bar"
+    end if
+
+    ! Add breadcrumb row to main box
+    call gtk_box_append(main_box, breadcrumb_row)
 
     ! Create treemap drawing area widget
     drawing_area = create_treemap_widget()
