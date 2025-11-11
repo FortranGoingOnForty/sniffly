@@ -20,3 +20,5 @@ We'll have to be careful about scans in quicl succession or concurrent scans sin
 
 what other pitfalls do you see? Let's discuss and plan this feature'
 
+The tab bar should fit cleanly into the existing interface. we shouldn't ahve to condense or stretch a whole lot, we should just slot it underneath te toolbar on the right side, and again have it grow leftwards, we should cap at 5 tabs or whatever your performance analysis comes back with. My arbitrary 5 came from just wondering who would need that realistically. anyway. let's plan this!''
+

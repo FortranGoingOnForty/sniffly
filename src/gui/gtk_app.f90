@@ -18,7 +18,8 @@ module gtk_app
                  gtk_entry_new, gtk_entry_buffer_set_text, gtk_entry_get_buffer, &
                  gtk_editable_set_editable, gtk_editable_get_text, &
                  gtk_entry_set_placeholder_text, gtk_widget_add_css_class, &
-                 gtk_widget_remove_css_class
+                 gtk_widget_remove_css_class, gtk_css_provider_new, &
+                 gtk_css_provider_load_from_string, gtk_style_context_add_provider_for_display
   use gdk, only: gdk_display_get_default, gdk_display_get_clipboard, gdk_clipboard_set_text
   use g, only: g_application_run, g_idle_add, g_timeout_add_seconds_once
   use treemap_widget, only: create_treemap_widget, set_scan_path, register_navigation_callback, &
@@ -29,14 +30,19 @@ module gtk_app
                                 set_navigation_callback, get_previous_breadcrumb_path, &
                                 clear_previous_breadcrumb_path
   use treemap_renderer, only: register_progress_callback, scan_directory, set_redraw_widget, &
-                               register_scan_completion_callback
+                               register_scan_completion_callback, set_renderer_state_from_tab
+  use tab_manager, only: tab_state, init_tab_manager, create_tab, get_active_tab, &
+                         switch_to_tab, close_tab, num_tabs, active_tab_index, get_path_basename
+  use cairo_tab_bar, only: create_cairo_tab_bar, refresh_cairo_tab_bar, &
+                           register_cairo_tab_switch_callback, register_cairo_tab_close_callback, &
+                           register_cairo_new_tab_callback
   implicit none
   private
 
   public :: sniffly_app_run, sniffly_app_quit, sniffly_set_scan_path, &
             sniffly_update_status, sniffly_show_error, breadcrumb_callback, &
             sniffly_update_progress, sniffly_show_progress, sniffly_hide_progress, &
-            sniffly_update_status_bar_stats, get_forward_path
+            sniffly_update_status_bar_stats, get_forward_path, update_ui_for_active_tab
 
   ! Application constants
   character(len=*), parameter :: APP_ID = "org.fortrangoingonforty.sniffly"
@@ -78,10 +84,30 @@ module gtk_app
   type(c_ptr), save :: open_finder_btn_ptr = c_null_ptr
   type(c_ptr), save :: delete_btn_ptr = c_null_ptr
 
+  ! Open directory button pointer (for pulsing on empty tabs)
+  type(c_ptr), save :: open_dir_btn_ptr = c_null_ptr
+
+  ! Toggle button pointers (for active state indicators)
+  type(c_ptr), save :: toggle_dotfiles_btn_ptr = c_null_ptr
+  logical, save :: dotfiles_button_active = .true.  ! Track button state (starts true since hidden files shown by default)
+
+  ! Drawing area pointer (for redrawing treemap)
+  type(c_ptr), save :: drawing_area_ptr = c_null_ptr
+
   ! Pending navigation state for synthetic paths
   logical, save :: pending_synthetic_nav = .false.
   character(len=512), save :: pending_synthetic_child_name = ""
   integer, save :: synthetic_nav_attempts = 0  ! Count attempts to avoid infinite loops
+
+  ! C interface for macOS native file picker
+  interface
+    function macos_show_folder_picker(output_path, max_len) bind(c, name='macos_show_folder_picker')
+      import :: c_char, c_int
+      character(kind=c_char), dimension(*) :: output_path
+      integer(c_int), value :: max_len
+      integer(c_int) :: macos_show_folder_picker
+    end function macos_show_folder_picker
+  end interface
 
 contains
 
@@ -133,13 +159,15 @@ contains
     back_btn_ptr = c_null_ptr
     forward_btn_ptr = c_null_ptr
     cancel_scan_btn_ptr = c_null_ptr
+    open_dir_btn_ptr = c_null_ptr
   end subroutine sniffly_app_quit
 
   ! Set the directory path to scan (call before sniffly_app_run)
   subroutine sniffly_set_scan_path(path)
     character(len=*), intent(in) :: path
+    ! Store in legacy global for now - will be used to create first tab in on_activate
     global_scan_path = trim(path)
-    print *, "Scan path set to: ", trim(global_scan_path)
+    print *, "Initial scan path set to: ", trim(global_scan_path)
   end subroutine sniffly_set_scan_path
 
   ! Callback when window close button (X) is clicked
@@ -163,6 +191,7 @@ contains
     path_entry_ptr = c_null_ptr
     back_btn_ptr = c_null_ptr
     forward_btn_ptr = c_null_ptr
+    open_dir_btn_ptr = c_null_ptr
     main_window_ptr = c_null_ptr
 
     ! Return FALSE (0) to allow the window to close
@@ -172,9 +201,14 @@ contains
   ! Callback when application activates (startup)
   subroutine on_activate(app, user_data) bind(c)
     type(c_ptr), value :: app, user_data
-    type(c_ptr) :: drawing_area, main_box, toolbar, open_dir_btn, scan_btn, cancel_scan_btn, back_btn, forward_btn, up_btn, open_finder_btn, copy_path_btn, info_btn, toggle_dotfiles_btn, toggle_ext_btn, toggle_render_btn, delete_btn, status_bar, breadcrumb_widget
+    type(c_ptr) :: drawing_area, main_box, toolbar, open_dir_btn, scan_btn, cancel_scan_btn, back_btn, forward_btn, up_btn, open_finder_btn, copy_path_btn, info_btn, toggle_dotfiles_btn, toggle_ext_btn, toggle_render_btn, delete_btn, status_bar, breadcrumb_widget, breadcrumb_row, tab_bar
     character(len=512) :: scan_path
     integer(c_int) :: idle_id
+    integer :: first_tab_index
+
+    ! Initialize tab manager
+    call init_tab_manager()
+    print *, "Tab manager initialized"
 
     ! Create main window
     main_window_ptr = gtk_application_window_new(app)
@@ -205,6 +239,14 @@ contains
       print *, "Click the folder icon to select a different directory"
     end if
 
+    ! Create first tab with initial scan path
+    first_tab_index = create_tab(scan_path)
+    if (first_tab_index < 0) then
+      print *, "ERROR: Failed to create initial tab"
+      return
+    end if
+    print *, "Created initial tab ", first_tab_index, " for: ", trim(scan_path)
+
     ! Create main vertical box (toolbar + treemap)
     main_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0_c_int)
 
@@ -213,6 +255,7 @@ contains
 
     ! Create Open Directory button with folder icon
     open_dir_btn = gtk_button_new()
+    open_dir_btn_ptr = open_dir_btn  ! Store for later access (pulsing on empty tabs)
     call gtk_button_set_icon_name(open_dir_btn, "folder-open"//c_null_char)
     call gtk_widget_set_tooltip_text(open_dir_btn, "Open Directory (Ctrl+O)"//c_null_char)
     call g_signal_connect(open_dir_btn, "clicked"//c_null_char, &
@@ -317,8 +360,10 @@ contains
 
     ! Toggle Dotfiles button
     toggle_dotfiles_btn = gtk_button_new()
+    toggle_dotfiles_btn_ptr = toggle_dotfiles_btn  ! Store reference for state updates
     call gtk_button_set_icon_name(toggle_dotfiles_btn, "view-reveal-symbolic"//c_null_char)
     call gtk_widget_set_tooltip_text(toggle_dotfiles_btn, "Toggle Hidden Files/Dotfiles"//c_null_char)
+    call gtk_widget_add_css_class(toggle_dotfiles_btn, "suggested-action"//c_null_char)  ! Start active (hidden files shown by default)
     call g_signal_connect(toggle_dotfiles_btn, "clicked"//c_null_char, &
                            c_funloc(on_toggle_dotfiles_clicked), c_null_ptr)
     call gtk_box_append(toolbar, toggle_dotfiles_btn)
@@ -351,6 +396,9 @@ contains
     ! Add toolbar to main box
     call gtk_box_append(main_box, toolbar)
 
+    ! Create horizontal box for breadcrumb row (breadcrumb + tab bar)
+    breadcrumb_row = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5_c_int)
+
     ! Create custom Cairo breadcrumb widget
     breadcrumb_widget = create_breadcrumb_widget()
     if (.not. c_associated(breadcrumb_widget)) then
@@ -361,8 +409,29 @@ contains
     ! Register navigation callback for breadcrumb
     call set_navigation_callback(breadcrumb_callback)
 
-    ! Add breadcrumb widget to main box
-    call gtk_box_append(main_box, breadcrumb_widget)
+    ! Make breadcrumb expand to fill space (pushes tab bar to right)
+    call gtk_widget_set_hexpand(breadcrumb_widget, 1_c_int)
+
+    ! Add breadcrumb widget to breadcrumb row
+    call gtk_box_append(breadcrumb_row, breadcrumb_widget)
+
+    ! Create Cairo-rendered tab bar (on right side of breadcrumb row)
+    tab_bar = create_cairo_tab_bar()
+    if (c_associated(tab_bar)) then
+      call gtk_box_append(breadcrumb_row, tab_bar)
+      ! Register callbacks for tab interactions
+      call register_cairo_tab_switch_callback(on_cairo_tab_switch)
+      call register_cairo_tab_close_callback(on_cairo_tab_close)
+      call register_cairo_new_tab_callback(on_cairo_new_tab)
+      ! Trigger initial draw
+      call refresh_cairo_tab_bar()
+      print *, "Cairo tab bar added to breadcrumb row"
+    else
+      print *, "ERROR: Failed to create Cairo tab bar"
+    end if
+
+    ! Add breadcrumb row to main box
+    call gtk_box_append(main_box, breadcrumb_row)
 
     ! Create treemap drawing area widget
     drawing_area = create_treemap_widget()
@@ -371,6 +440,12 @@ contains
       print *, "ERROR: Failed to create treemap widget"
       return
     end if
+
+    ! Store pointer for later use (e.g., tab switching redraw)
+    drawing_area_ptr = drawing_area
+
+    ! Add CSS class for card styling (border that matches active tab)
+    call gtk_widget_add_css_class(drawing_area, "canvas-card"//c_null_char)
 
     ! Make drawing area expand to fill space
     call gtk_widget_set_hexpand(drawing_area, 1_c_int)
@@ -427,6 +502,9 @@ contains
     ! Register keyboard handler on window (not widget) for global keyboard capture
     call register_key_handler(main_window_ptr)
 
+    ! Load custom CSS (including pulsing animation for suggested-action)
+    call load_custom_css()
+
     ! Show the window first with "Scanning..." status
     call gtk_window_present(main_window_ptr)
 
@@ -440,53 +518,109 @@ contains
     print *, "Window size: ", DEFAULT_WIDTH, "x", DEFAULT_HEIGHT
   end subroutine on_activate
 
+  ! Load custom CSS for animations and styling
+  subroutine load_custom_css()
+    type(c_ptr) :: css_provider, display
+    character(len=:), allocatable :: css_data
+
+    ! CSS for canvas card border styling
+    css_data = &
+      ".canvas-card { " // &
+      "background-color: rgba(250, 250, 250, 1.0); " // &
+      "border: 1px solid rgba(179, 179, 179, 1.0); " // &
+      "border-top: none; " // &
+      "}"
+
+    ! Create CSS provider
+    css_provider = gtk_css_provider_new()
+
+    ! Load CSS from string
+    call gtk_css_provider_load_from_string(css_provider, trim(css_data)//c_null_char)
+
+    ! Get default display
+    display = gdk_display_get_default()
+
+    ! Add CSS provider to display (800 = GTK_STYLE_PROVIDER_PRIORITY_USER)
+    call gtk_style_context_add_provider_for_display(display, css_provider, 800_c_int)
+
+    print *, "Custom CSS loaded (canvas card styling)"
+  end subroutine load_custom_css
+
   ! Callback when Open Directory button is clicked
-  ! NOTE: Uses system command for file picking until GTK4 file dialog bindings are available
+  ! Uses native macOS NSOpenPanel for fast, focus-preserving file picker
   subroutine on_open_dir_clicked(button, user_data) bind(c)
     type(c_ptr), value :: button, user_data
+    type(tab_state), pointer :: tab
+    character(kind=c_char, len=1024) :: c_path
     character(len=1024) :: selected_path
-    integer :: status
+    integer(c_int) :: status
+    integer :: i, path_len
 
     print *, "Open Directory button clicked!"
 
-    ! Call helper to show native file picker
-    call show_native_directory_picker(selected_path, status)
+    ! Get active tab
+    tab => get_active_tab()
+    if (.not. associated(tab)) then
+      print *, "ERROR: No active tab in on_open_dir_clicked"
+      return
+    end if
 
-    if (status == 0 .and. len_trim(selected_path) > 0) then
-      print *, "Selected directory: ", trim(selected_path)
+    ! Call native macOS file picker (modal, maintains focus)
+    status = macos_show_folder_picker(c_path, int(len(c_path), c_int))
 
-      ! Update global scan path (but don't scan yet)
-      ! Remove trailing slash if present (C code doesn't like it)
-      if (len_trim(selected_path) > 1 .and. selected_path(len_trim(selected_path):len_trim(selected_path)) == '/') then
-        global_scan_path = trim(selected_path(1:len_trim(selected_path)-1))
-        print *, "DEBUG: Removed trailing slash from path"
-      else
-        global_scan_path = trim(selected_path)
+    if (status == 0) then
+      ! Convert C string to Fortran string
+      path_len = 0
+      do i = 1, len(c_path)
+        if (c_path(i:i) == c_null_char) exit
+        path_len = i
+      end do
+
+      if (path_len > 0) then
+        selected_path = c_path(1:path_len)
+        print *, "Selected directory: ", trim(selected_path)
+
+        ! Update tab scan path
+        ! Remove trailing slash if present (C code doesn't like it)
+        if (len_trim(selected_path) > 1 .and. &
+            selected_path(len_trim(selected_path):len_trim(selected_path)) == '/') then
+          tab%scan_path = trim(selected_path(1:len_trim(selected_path)-1))
+        else
+          tab%scan_path = trim(selected_path)
+        end if
+
+        call set_scan_path(trim(tab%scan_path))
+        call update_path_entry(trim(tab%scan_path))
+
+        ! Auto-start scan immediately after directory selection
+        call sniffly_update_status("Scanning...")
+        call trigger_rescan(tab%scan_path)
       end if
-      print *, "DEBUG: Set global_scan_path to: '", trim(global_scan_path), "'"
-      call set_scan_path(trim(global_scan_path))
-
-      ! Update path display entry
-      call update_path_entry(trim(global_scan_path))
-
-      print *, "Path updated. Click Scan button to scan: ", trim(global_scan_path)
     else
-      print *, "Directory selection cancelled or failed"
+      print *, "Directory selection cancelled"
     end if
   end subroutine on_open_dir_clicked
 
   ! Callback when Scan button is clicked
   subroutine on_scan_clicked(button, user_data) bind(c)
     type(c_ptr), value :: button, user_data
+    type(tab_state), pointer :: tab
 
-    if (len_trim(global_scan_path) == 0) then
+    ! Get active tab
+    tab => get_active_tab()
+    if (.not. associated(tab)) then
+      print *, "ERROR: No active tab in on_scan_clicked"
+      return
+    end if
+
+    if (len_trim(tab%scan_path) == 0) then
       call sniffly_show_error("No directory to scan")
       return
     end if
 
     ! Trigger a rescan of the current path (uses cache for speed)
     call sniffly_update_status("Rescanning...")
-    call trigger_rescan(global_scan_path)
+    call trigger_rescan(tab%scan_path)
   end subroutine on_scan_clicked
 
   ! Callback when Cancel Scan button is clicked
@@ -509,6 +643,7 @@ contains
   ! Callback when Open in Finder button is clicked
   subroutine on_open_finder_clicked(button, user_data) bind(c)
     type(c_ptr), value :: button, user_data
+    type(tab_state), pointer :: tab
     character(len=:), allocatable :: selected_path
 
     print *, "Open in Finder button clicked!"
@@ -524,12 +659,19 @@ contains
       print *, "Opening selected item in Finder: ", trim(selected_path)
     else
       ! No selection - use current directory
-      if (len_trim(global_scan_path) == 0) then
+      ! Get active tab
+      tab => get_active_tab()
+      if (.not. associated(tab)) then
+        print *, "ERROR: No active tab in on_open_finder_clicked"
+        return
+      end if
+
+      if (len_trim(tab%scan_path) == 0) then
          print *, "No current directory to open"
         call sniffly_show_error("No directory to open in Finder")
         return
       end if
-      selected_path = trim(global_scan_path)
+      selected_path = trim(tab%scan_path)
       print *, "Opening current directory in Finder: ", trim(selected_path)
     end if
 
@@ -702,33 +844,43 @@ contains
   subroutine update_history_buttons()
     use gtk, only: gtk_widget_set_sensitive
     use progressive_scanner, only: is_scan_active
+    type(tab_state), pointer :: tab
     logical :: scan_active
 
     ! Guard against accessing widgets during shutdown
     if (app_is_shutting_down) return
     if (.not. c_associated(back_btn_ptr) .or. .not. c_associated(forward_btn_ptr)) return
 
+    ! Get active tab
+    tab => get_active_tab()
+    if (.not. associated(tab)) then
+      ! No active tab - disable buttons
+      call gtk_widget_set_sensitive(back_btn_ptr, 0_c_int)
+      call gtk_widget_set_sensitive(forward_btn_ptr, 0_c_int)
+      return
+    end if
+
     ! Check if scan is active - disable buttons during scan
     scan_active = is_scan_active()
 
     print *, "=== UPDATE_HISTORY_BUTTONS ==="
-    print *, "  pos=", nav_history_pos, " count=", nav_history_count, " scan_active=", scan_active
+    print *, "  pos=", tab%nav_history_pos, " count=", tab%nav_history_count, " scan_active=", scan_active
 
     ! Enable Back if we're not at the start of history AND scan is not active
-    if (nav_history_pos > 1 .and. .not. scan_active) then
+    if (tab%nav_history_pos > 1 .and. .not. scan_active) then
       print *, "  Enabling Back (pos > 1 and scan not active)"
       call gtk_widget_set_sensitive(back_btn_ptr, 1_c_int)
     else
-      print *, "  Disabling Back (pos=", nav_history_pos, " or scan active)"
+      print *, "  Disabling Back (pos=", tab%nav_history_pos, " or scan active)"
       call gtk_widget_set_sensitive(back_btn_ptr, 0_c_int)
     end if
 
     ! Enable Forward if we're not at the end of history AND scan is not active
-    if (nav_history_pos > 0 .and. nav_history_pos < nav_history_count .and. .not. scan_active) then
+    if (tab%nav_history_pos > 0 .and. tab%nav_history_pos < tab%nav_history_count .and. .not. scan_active) then
       print *, "  Enabling Forward (pos < count and scan not active)"
       call gtk_widget_set_sensitive(forward_btn_ptr, 1_c_int)
     else
-      print *, "  Disabling Forward (pos=", nav_history_pos, " count=", nav_history_count, " or scan active)"
+      print *, "  Disabling Forward (pos=", tab%nav_history_pos, " count=", tab%nav_history_count, " or scan active)"
       call gtk_widget_set_sensitive(forward_btn_ptr, 0_c_int)
     end if
   end subroutine update_history_buttons
@@ -798,56 +950,149 @@ contains
     call gtk_widget_set_sensitive(open_finder_btn_ptr, 1_c_int)
   end subroutine update_selection_buttons
 
+  ! Update UI to reflect the active tab's state (called when switching tabs)
+  subroutine update_ui_for_active_tab()
+    use gtk, only: gtk_widget_queue_draw
+    use types, only: file_node
+    type(tab_state), pointer :: tab
+    type(file_node), pointer :: current_view
+
+    print *, "=== UPDATE_UI_FOR_ACTIVE_TAB ==="
+
+    ! Get active tab
+    tab => get_active_tab()
+    if (.not. associated(tab)) then
+      print *, "ERROR: No active tab"
+      return
+    end if
+
+    print *, "  Active tab index: ", active_tab_index
+    print *, "  Tab has_data: ", tab%has_data
+    print *, "  Tab scan_path: ", trim(tab%scan_path)
+
+    ! Sync treemap widget's scan path with active tab's scan path
+    call set_scan_path(trim(tab%scan_path))
+
+    ! Sync renderer state with active tab (CRITICAL for correct rendering)
+    call set_renderer_state_from_tab(tab%root_node, tab%current_view_node, tab%has_data)
+
+    ! Check if tab has data
+    if (.not. tab%has_data) then
+      print *, "  Tab has no data yet - showing empty tab UI"
+
+      ! Add blue suggested-action class to open-dir button to draw attention
+      if (c_associated(open_dir_btn_ptr)) then
+        call gtk_widget_add_css_class(open_dir_btn_ptr, "suggested-action"//c_null_char)
+      end if
+
+      ! Clear breadcrumb display
+      call update_breadcrumb_cache("")
+
+      ! Clear path entry
+      call update_path_entry("")
+
+      ! Update status bar to guide user
+      call sniffly_update_status("No directory selected - click the folder icon to choose a directory")
+
+      ! Clear the treemap drawing (redraw with no data will show blank)
+      if (c_associated(drawing_area_ptr)) then
+        call gtk_widget_queue_draw(drawing_area_ptr)
+      end if
+
+      return
+    end if
+
+    ! Tab has data - remove suggested-action class from open-dir button
+    if (c_associated(open_dir_btn_ptr)) then
+      call gtk_widget_remove_css_class(open_dir_btn_ptr, "suggested-action"//c_null_char)
+    end if
+
+    ! Get the current view node
+    current_view => tab%current_view_node
+    if (.not. associated(current_view)) then
+      print *, "ERROR: Tab has_data=true but current_view_node not associated"
+      return
+    end if
+
+    print *, "  Updating breadcrumb for: ", trim(current_view%path)
+
+    ! Update breadcrumb cache
+    call update_breadcrumb_cache(trim(current_view%path))
+
+    ! Trigger treemap redraw
+    if (c_associated(drawing_area_ptr)) then
+      call gtk_widget_queue_draw(drawing_area_ptr)
+      print *, "  Triggered treemap redraw"
+    end if
+
+    ! Update navigation buttons
+    call update_history_buttons()
+
+    ! Update path entry
+    call update_path_entry(trim(current_view%path))
+
+    print *, "=== UI UPDATE COMPLETE ==="
+  end subroutine update_ui_for_active_tab
+
   ! Helper: Add path to navigation history
   subroutine add_to_history(path)
     character(len=*), intent(in) :: path
+    type(tab_state), pointer :: tab
     integer :: i
 
     print *, "=== ADD_TO_HISTORY CALLED ==="
     print *, "  Path: ", trim(path)
-    print *, "  Before: pos=", nav_history_pos, " count=", nav_history_count
-    if (nav_history_count > 0) then
+
+    ! Get active tab
+    tab => get_active_tab()
+    if (.not. associated(tab)) then
+      print *, "ERROR: No active tab in add_to_history"
+      return
+    end if
+
+    print *, "  Before: pos=", tab%nav_history_pos, " count=", tab%nav_history_count
+    if (tab%nav_history_count > 0) then
       print *, "  Current history:"
-      do i = 1, nav_history_count
-        if (i == nav_history_pos) then
-          print *, "    [", i, "] (CURRENT) ", trim(nav_history(i))
+      do i = 1, tab%nav_history_count
+        if (i == tab%nav_history_pos) then
+          print *, "    [", i, "] (CURRENT) ", trim(tab%nav_history(i))
         else
-          print *, "    [", i, "] ", trim(nav_history(i))
+          print *, "    [", i, "] ", trim(tab%nav_history(i))
         end if
       end do
     end if
 
     ! Don't add if it's the same as current position
-    if (nav_history_pos > 0 .and. nav_history_pos <= nav_history_count) then
-      if (trim(nav_history(nav_history_pos)) == trim(path)) then
+    if (tab%nav_history_pos > 0 .and. tab%nav_history_pos <= tab%nav_history_count) then
+      if (trim(tab%nav_history(tab%nav_history_pos)) == trim(path)) then
         print *, "  Path same as current position - not adding"
         return
       end if
     end if
 
     ! If we're in the middle of history, discard forward history
-    if (nav_history_pos > 0 .and. nav_history_pos < nav_history_count) then
+    if (tab%nav_history_pos > 0 .and. tab%nav_history_pos < tab%nav_history_count) then
       print *, "  In middle of history - truncating forward history"
-      print *, "  Truncating count from", nav_history_count, "to", nav_history_pos
-      nav_history_count = nav_history_pos
+      print *, "  Truncating count from", tab%nav_history_count, "to", tab%nav_history_pos
+      tab%nav_history_count = tab%nav_history_pos
     end if
 
     ! Add to history
-    if (nav_history_count < MAX_HISTORY) then
-      nav_history_count = nav_history_count + 1
-      nav_history(nav_history_count) = trim(path)
-      print *, "  Added to history at position", nav_history_count
+    if (tab%nav_history_count < MAX_HISTORY) then
+      tab%nav_history_count = tab%nav_history_count + 1
+      tab%nav_history(tab%nav_history_count) = trim(path)
+      print *, "  Added to history at position", tab%nav_history_count
     else
       ! Shift history left and add at end
       print *, "  History full - shifting left"
       do i = 1, MAX_HISTORY - 1
-        nav_history(i) = nav_history(i + 1)
+        tab%nav_history(i) = tab%nav_history(i + 1)
       end do
-      nav_history(MAX_HISTORY) = trim(path)
+      tab%nav_history(MAX_HISTORY) = trim(path)
     end if
 
-    nav_history_pos = nav_history_count
-    print *, "  After: pos=", nav_history_pos, " count=", nav_history_count
+    tab%nav_history_pos = tab%nav_history_count
+    print *, "  After: pos=", tab%nav_history_pos, " count=", tab%nav_history_count
     print *, "=== END ADD_TO_HISTORY ==="
     call update_history_buttons()
   end subroutine add_to_history
@@ -971,9 +1216,18 @@ contains
   subroutine on_back_clicked(button, user_data) bind(c)
     use progressive_scanner, only: is_scan_active
     type(c_ptr), value :: button, user_data
+    type(tab_state), pointer :: tab
 
     print *, "=== BACK BUTTON CLICKED ==="
-    print *, "  Before: pos=", nav_history_pos, " count=", nav_history_count
+
+    ! Get active tab
+    tab => get_active_tab()
+    if (.not. associated(tab)) then
+      print *, "ERROR: No active tab in on_back_clicked"
+      return
+    end if
+
+    print *, "  Before: pos=", tab%nav_history_pos, " count=", tab%nav_history_count
 
     ! Block navigation if scan is active
     if (is_scan_active()) then
@@ -981,17 +1235,17 @@ contains
       return
     end if
 
-    if (nav_history_pos > 1) then
-      nav_history_pos = nav_history_pos - 1
-      global_scan_path = trim(nav_history(nav_history_pos))
-      print *, "  Moving back to pos=", nav_history_pos
-      print *, "  Path: ", trim(global_scan_path)
-      navigating_history = .true.  ! Set flag before triggering rescan
-      call set_scan_path(trim(global_scan_path))
-      call update_path_entry(trim(global_scan_path))
-      call trigger_rescan(global_scan_path)
+    if (tab%nav_history_pos > 1) then
+      tab%nav_history_pos = tab%nav_history_pos - 1
+      tab%scan_path = trim(tab%nav_history(tab%nav_history_pos))
+      print *, "  Moving back to pos=", tab%nav_history_pos
+      print *, "  Path: ", trim(tab%scan_path)
+      tab%navigating_history = .true.  ! Set flag before triggering rescan
+      call set_scan_path(trim(tab%scan_path))
+      call update_path_entry(trim(tab%scan_path))
+      call trigger_rescan(tab%scan_path)
       call update_history_buttons()
-      call sniffly_update_status("Navigated back to: " // trim(global_scan_path))
+      call sniffly_update_status("Navigated back to: " // trim(tab%scan_path))
     end if
   end subroutine on_back_clicked
 
@@ -999,10 +1253,19 @@ contains
   subroutine on_forward_clicked(button, user_data) bind(c)
     use progressive_scanner, only: is_scan_active
     type(c_ptr), value :: button, user_data
+    type(tab_state), pointer :: tab
     logical :: is_synthetic
 
     print *, "=== FORWARD BUTTON CLICKED ==="
-    print *, "  Before: pos=", nav_history_pos, " count=", nav_history_count
+
+    ! Get active tab
+    tab => get_active_tab()
+    if (.not. associated(tab)) then
+      print *, "ERROR: No active tab in on_forward_clicked"
+      return
+    end if
+
+    print *, "  Before: pos=", tab%nav_history_pos, " count=", tab%nav_history_count
 
     ! Block navigation if scan is active
     if (is_scan_active()) then
@@ -1010,29 +1273,29 @@ contains
       return
     end if
 
-    if (nav_history_pos > 0 .and. nav_history_pos < nav_history_count) then
-      nav_history_pos = nav_history_pos + 1
-      global_scan_path = trim(nav_history(nav_history_pos))
-      print *, "  Moving forward to pos=", nav_history_pos
-      print *, "  Path: ", trim(global_scan_path)
+    if (tab%nav_history_pos > 0 .and. tab%nav_history_pos < tab%nav_history_count) then
+      tab%nav_history_pos = tab%nav_history_pos + 1
+      tab%scan_path = trim(tab%nav_history(tab%nav_history_pos))
+      print *, "  Moving forward to pos=", tab%nav_history_pos
+      print *, "  Path: ", trim(tab%scan_path)
 
-      navigating_history = .true.  ! Set flag before triggering rescan
+      tab%navigating_history = .true.  ! Set flag before triggering rescan
 
       ! Check if this is a synthetic path (grouped small files node)
-      is_synthetic = (index(global_scan_path, '[') > 0 .and. &
-                      index(global_scan_path, 'small files]') > 0)
+      is_synthetic = (index(tab%scan_path, '[') > 0 .and. &
+                      index(tab%scan_path, 'small files]') > 0)
 
       if (is_synthetic) then
         print *, "  Synthetic path detected - navigating by tree traversal"
-        call navigate_to_synthetic_path(global_scan_path)
+        call navigate_to_synthetic_path(tab%scan_path)
       else
-        call set_scan_path(trim(global_scan_path))
-        call update_path_entry(trim(global_scan_path))
-        call trigger_rescan(global_scan_path)
+        call set_scan_path(trim(tab%scan_path))
+        call update_path_entry(trim(tab%scan_path))
+        call trigger_rescan(tab%scan_path)
       end if
 
       call update_history_buttons()
-      call sniffly_update_status("Navigated forward to: " // trim(global_scan_path))
+      call sniffly_update_status("Navigated forward to: " // trim(tab%scan_path))
     end if
   end subroutine on_forward_clicked
 
@@ -1096,14 +1359,40 @@ contains
   ! Callback when Toggle Dotfiles button is clicked
   subroutine on_toggle_dotfiles_clicked(button, user_data) bind(c)
     use treemap_renderer, only: toggle_hidden_files
+    use gtk, only: gtk_widget_add_css_class, gtk_widget_remove_css_class
     type(c_ptr), value :: button, user_data
+    type(tab_state), pointer :: tab
 
+    ! Get active tab
+    tab => get_active_tab()
+    if (.not. associated(tab)) then
+      print *, "ERROR: No active tab in on_toggle_dotfiles_clicked"
+      return
+    end if
+
+    ! Toggle the hidden files state in renderer
     call toggle_hidden_files()
-    call sniffly_update_status("Toggled hidden files visibility - rescanning...")
+
+    ! Toggle our button state tracker
+    dotfiles_button_active = .not. dotfiles_button_active
+
+    print *, "DEBUG: dotfiles_button_active =", dotfiles_button_active
+    print *, "DEBUG: toggle_dotfiles_btn_ptr associated?", c_associated(toggle_dotfiles_btn_ptr)
+
+    ! Update button visual state - toggle GTK's built-in suggested-action class
+    if (dotfiles_button_active) then
+      print *, "DEBUG: Adding 'suggested-action' CSS class"
+      call gtk_widget_add_css_class(toggle_dotfiles_btn_ptr, "suggested-action"//c_null_char)
+      call sniffly_update_status("Showing hidden files - rescanning...")
+    else
+      print *, "DEBUG: Removing 'suggested-action' CSS class"
+      call gtk_widget_remove_css_class(toggle_dotfiles_btn_ptr, "suggested-action"//c_null_char)
+      call sniffly_update_status("Hiding hidden files - rescanning...")
+    end if
 
     ! Trigger rescan to apply the filter
-    if (len_trim(global_scan_path) > 0) then
-      call trigger_rescan(global_scan_path)
+    if (len_trim(tab%scan_path) > 0) then
+      call trigger_rescan(tab%scan_path)
     end if
   end subroutine on_toggle_dotfiles_clicked
 
@@ -1124,6 +1413,81 @@ contains
     call toggle_render_mode()
     call sniffly_update_status("Toggled render mode (flat vs cushioned)")
   end subroutine on_toggle_render_mode_clicked
+
+  ! Cairo tab bar callback wrappers
+  subroutine on_cairo_tab_switch(tab_index)
+    integer, intent(in) :: tab_index
+
+    ! Skip if already on this tab
+    if (tab_index == active_tab_index) return
+
+    print *, "Cairo tab switch to tab ", tab_index
+
+    ! Switch to the clicked tab
+    call switch_to_tab(tab_index)
+
+    ! Trigger redraw of tab bar (highlights active tab)
+    call refresh_cairo_tab_bar()
+
+    ! Update UI for the new active tab
+    call update_ui_for_active_tab()
+
+    print *, "Switched to tab ", tab_index
+  end subroutine on_cairo_tab_switch
+
+  subroutine on_cairo_tab_close(tab_index)
+    integer, intent(in) :: tab_index
+
+    print *, "Cairo tab close for tab ", tab_index
+
+    ! Prevent closing last tab
+    if (num_tabs <= 1) then
+      print *, "ERROR: Cannot close last tab"
+      return
+    end if
+
+    ! Close the tab
+    call close_tab(tab_index)
+
+    ! Trigger redraw of tab bar
+    call refresh_cairo_tab_bar()
+
+    ! Update UI for the new active tab
+    call update_ui_for_active_tab()
+
+    print *, "Tab ", tab_index, " closed - now ", num_tabs, " tabs remaining"
+  end subroutine on_cairo_tab_close
+
+  subroutine on_cairo_new_tab()
+    integer :: new_tab_index
+    character(len=512) :: new_tab_path
+
+    print *, "Cairo new tab button clicked"
+
+    ! New tabs start completely empty - no path to avoid accidental scans
+    new_tab_path = ""
+
+    ! Create a new empty tab
+    new_tab_index = create_tab(new_tab_path)
+
+    if (new_tab_index < 0) then
+      print *, "ERROR: Failed to create new tab (max tabs reached?)"
+      return
+    end if
+
+    print *, "Created new tab ", new_tab_index
+
+    ! Switch to the new tab
+    call switch_to_tab(new_tab_index)
+
+    ! Trigger redraw of tab bar
+    call refresh_cairo_tab_bar()
+
+    ! Update UI for the new tab
+    call update_ui_for_active_tab()
+
+    print *, "Tab bar refreshed and switched to new tab ", new_tab_index
+  end subroutine on_cairo_new_tab
 
   ! Commented out unused helper function - was used by removed search/filter feature
   ! Uncomment if needed in future
@@ -1351,6 +1715,21 @@ contains
     end if
   end subroutine sniffly_update_status
 
+  ! Idle callback to restore window focus after native dialogs
+  function restore_window_focus(user_data) bind(c) result(continue)
+    type(c_ptr), value :: user_data
+    integer(c_int) :: continue
+
+    ! Restore window focus
+    if (.not. app_is_shutting_down .and. c_associated(main_window_ptr)) then
+      call gtk_window_present(main_window_ptr)
+      print *, "Window focus restored after dialog"
+    end if
+
+    ! Return 0 to indicate the idle callback should not repeat (one-shot)
+    continue = 0_c_int
+  end function restore_window_focus
+
   ! Timeout callback to clear status message (called after 5 seconds)
   function clear_status_message(user_data) bind(c) result(continue)
     type(c_ptr), value :: user_data
@@ -1452,10 +1831,19 @@ contains
 
   ! Get forward path (if we navigated backwards and there's a forward history)
   function get_forward_path() result(fwd_path)
+    type(tab_state), pointer :: tab
     character(len=512) :: fwd_path
+
     fwd_path = ""
-    if (nav_history_pos > 0 .and. nav_history_pos < nav_history_count) then
-      fwd_path = trim(nav_history(nav_history_pos + 1))
+
+    ! Get active tab
+    tab => get_active_tab()
+    if (.not. associated(tab)) then
+      return
+    end if
+
+    if (tab%nav_history_pos > 0 .and. tab%nav_history_pos < tab%nav_history_count) then
+      fwd_path = trim(tab%nav_history(tab%nav_history_pos + 1))
       print *, "Forward path available: ", trim(fwd_path)
     end if
   end function get_forward_path
@@ -1465,35 +1853,49 @@ contains
     use treemap_renderer, only: get_current_view_node
     use types, only: file_node
     type(file_node), pointer :: current_view
+    type(tab_state), pointer :: tab
     character(len=512) :: fwd_path, prev_breadcrumb_path
     integer :: i, matched_pos, current_len
     logical :: was_navigating_history, is_breadcrumb_lookahead
 
     print *, "=== BREADCRUMB_CALLBACK ==="
-    print *, "  navigating_history flag at entry: ", navigating_history
+
+    ! Get active tab
+    tab => get_active_tab()
+    if (.not. associated(tab)) then
+      print *, "ERROR: No active tab in breadcrumb_callback"
+      return
+    end if
+
+    print *, "  navigating_history flag at entry: ", tab%navigating_history
 
     ! Initialize variables
     fwd_path = ""
     is_breadcrumb_lookahead = .false.
 
     ! Save flag state
-    was_navigating_history = navigating_history
+    was_navigating_history = tab%navigating_history
 
-    ! Sync global_scan_path with the current view node's path
+    ! Sync tab scan_path with the current view node's path
     current_view => get_current_view_node()
     if (associated(current_view) .and. allocated(current_view%path)) then
-      global_scan_path = trim(current_view%path)
-      print *, "  Synced global_scan_path to: ", trim(global_scan_path)
-      print *, "  Current nav_history_pos: ", nav_history_pos, " nav_history_count: ", nav_history_count
+      tab%scan_path = trim(current_view%path)
+
+      ! Update tab label to reflect new path
+      tab%label = get_path_basename(trim(tab%scan_path))
+
+      print *, "  Synced tab scan_path to: ", trim(tab%scan_path)
+      print *, "  Updated tab label to: ", trim(tab%label)
+      print *, "  Current nav_history_pos: ", tab%nav_history_pos, " nav_history_count: ", tab%nav_history_count
 
       ! Check for breadcrumb-based lookahead first (when clicking up in breadcrumb)
       prev_breadcrumb_path = get_previous_breadcrumb_path()
       if (len_trim(prev_breadcrumb_path) > 0) then
         print *, "  Previous breadcrumb path: ", trim(prev_breadcrumb_path)
         ! Check if current path is a prefix of previous path (navigating up)
-        current_len = len_trim(global_scan_path)
+        current_len = len_trim(tab%scan_path)
         if (len_trim(prev_breadcrumb_path) > current_len) then
-          if (prev_breadcrumb_path(1:current_len) == global_scan_path(1:current_len)) then
+          if (prev_breadcrumb_path(1:current_len) == tab%scan_path(1:current_len)) then
             ! We navigated to a parent directory via breadcrumb
             fwd_path = trim(prev_breadcrumb_path)
             is_breadcrumb_lookahead = .true.
@@ -1510,20 +1912,20 @@ contains
       ! Check if this path matches any entry in history (for breadcrumb clicks)
       ! This syncs nav_history_pos with breadcrumb navigation
       ! Only do this if we're NOT already in a history navigation (back/forward button)
-      if (.not. was_navigating_history .and. nav_history_count > 0) then
+      if (.not. was_navigating_history .and. tab%nav_history_count > 0) then
         matched_pos = 0
-        do i = 1, nav_history_count
-          if (trim(nav_history(i)) == trim(global_scan_path)) then
+        do i = 1, tab%nav_history_count
+          if (trim(tab%nav_history(i)) == trim(tab%scan_path)) then
             matched_pos = i
             print *, "  Found path in history at position ", i
             exit
           end if
         end do
 
-        if (matched_pos > 0 .and. matched_pos /= nav_history_pos) then
-          print *, "  Breadcrumb navigation: syncing history pos from ", nav_history_pos, " to ", matched_pos
-          nav_history_pos = matched_pos
-          navigating_history = .true.  ! Mark as history navigation to skip add_to_history
+        if (matched_pos > 0 .and. matched_pos /= tab%nav_history_pos) then
+          print *, "  Breadcrumb navigation: syncing history pos from ", tab%nav_history_pos, " to ", matched_pos
+          tab%nav_history_pos = matched_pos
+          tab%navigating_history = .true.  ! Mark as history navigation to skip add_to_history
         else if (matched_pos > 0) then
           print *, "  Path matches current history position - no sync needed"
         else
@@ -1554,14 +1956,14 @@ contains
     ! Add to history if this is a new navigation
     ! Skip only if: (1) using back/forward buttons OR (2) history-based forward path exists
     ! BUT: breadcrumb-based lookahead IS a new navigation and should be added!
-    if (.not. navigating_history .and. (len_trim(fwd_path) == 0 .or. is_breadcrumb_lookahead)) then
+    if (.not. tab%navigating_history .and. (len_trim(fwd_path) == 0 .or. is_breadcrumb_lookahead)) then
       ! New navigation (including breadcrumb navigation with lookahead)
-      if (len_trim(global_scan_path) > 0) then
+      if (len_trim(tab%scan_path) > 0) then
         print *, "  Calling add_to_history (new navigation, breadcrumb_lookahead=", is_breadcrumb_lookahead, ")"
-        call add_to_history(global_scan_path)
+        call add_to_history(tab%scan_path)
       end if
     else
-      if (navigating_history) then
+      if (tab%navigating_history) then
         print *, "  Skipping add_to_history (history navigation mode)"
       else
         print *, "  Skipping add_to_history (history-based forward context exists)"
@@ -1570,10 +1972,13 @@ contains
 
     ! ALWAYS reset the flag at the end (ensure it doesn't stick)
     print *, "  Resetting navigating_history flag to false"
-    navigating_history = .false.
+    tab%navigating_history = .false.
 
     ! Update button states now that history may have changed
     call update_history_buttons()
+
+    ! Refresh Cairo tab bar to show updated label
+    call refresh_cairo_tab_bar()
   end subroutine breadcrumb_callback
 
   ! Show progress bar (now just resets to prepare for updates)
@@ -1678,8 +2083,16 @@ contains
   ! Callback wrapper for force refresh events (clear cache and rescan)
   subroutine refresh_callback_wrapper()
     use treemap_renderer, only: clear_cache, invalidate_layout
+    type(tab_state), pointer :: tab
 
     print *, "Force refresh triggered from keyboard shortcut"
+
+    ! Get active tab
+    tab => get_active_tab()
+    if (.not. associated(tab)) then
+      print *, "ERROR: No active tab in refresh_callback_wrapper"
+      return
+    end if
 
     ! Clear the directory cache
     call clear_cache()
@@ -1689,8 +2102,8 @@ contains
     call sniffly_update_status("Clearing cache and rescanning...")
 
     ! Trigger rescan if we have a path
-    if (len_trim(global_scan_path) > 0) then
-      call trigger_rescan(global_scan_path)
+    if (len_trim(tab%scan_path) > 0) then
+      call trigger_rescan(tab%scan_path)
     else
       call sniffly_show_error("No directory to scan")
     end if
@@ -1699,11 +2112,28 @@ contains
   ! Callback wrapper for scan completion
   subroutine scan_complete_callback_wrapper()
     use treemap_widget, only: mark_initial_scan_complete
+    use treemap_renderer, only: get_root_node, get_current_view_node
+    use types, only: file_node
+    type(tab_state), pointer :: tab
+    type(file_node), pointer :: root, current_view
 
     print *, "=== SCAN COMPLETE CALLBACK FIRED ==="
 
     ! Call the original completion callback
     call mark_initial_scan_complete()
+
+    ! Sync active tab's state with renderer (tab now has data)
+    tab => get_active_tab()
+    if (associated(tab)) then
+      root => get_root_node()
+      current_view => get_current_view_node()
+      if (associated(root)) then
+        tab%has_data = .true.
+        tab%root_node => root
+        tab%current_view_node => current_view
+        print *, "=== SYNCED TAB STATE AFTER SCAN COMPLETE ==="
+      end if
+    end if
 
     ! Update cancel button (scan is done, should be disabled and grey)
     print *, "=== UPDATING CANCEL BUTTON FROM COMPLETION CALLBACK ==="
@@ -1712,6 +2142,10 @@ contains
     ! Re-enable back/forward buttons if there's history
     print *, "=== RE-ENABLING NAVIGATION BUTTONS ==="
     call update_history_buttons()
+
+    ! Update UI for active tab (removes blue pulsing if tab now has data)
+    print *, "=== UPDATING UI FOR ACTIVE TAB (SCAN COMPLETE) ==="
+    call update_ui_for_active_tab()
 
     ! Complete any pending synthetic navigation
     if (pending_synthetic_nav) then
@@ -1744,11 +2178,9 @@ contains
       normalized_path = trim(path)
     end if
 
-    ! Process pending GTK events before starting scan
+    ! Process pending GTK events once before starting scan (minimal delay)
     context = g_main_context_default()
-    do i = 1, 10
-      do while (g_main_context_iteration(context, 0_c_int) /= 0_c_int)
-      end do
+    do while (g_main_context_iteration(context, 0_c_int) /= 0_c_int)
     end do
 
     print *, "=== ABOUT TO CALL scan_directory ==="
@@ -1760,10 +2192,8 @@ contains
     call update_cancel_scan_button_state()
     call update_history_buttons()
 
-    ! Process events after scan to update UI
-    do i = 1, 10
-      do while (g_main_context_iteration(context, 0_c_int) /= 0_c_int)
-      end do
+    ! Process events once after scan to update UI
+    do while (g_main_context_iteration(context, 0_c_int) /= 0_c_int)
     end do
 
     ! Invalidate layout to force recalculation

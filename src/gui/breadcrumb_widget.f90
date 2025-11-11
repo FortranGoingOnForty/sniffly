@@ -128,7 +128,11 @@ contains
     cached_forward_segment_paths = ""
     cached_forward_segment_names = ""
 
-    if (len_trim(full_path) == 0) return
+    ! If path is empty, trigger redraw to clear breadcrumb and return
+    if (len_trim(full_path) == 0) then
+      call queue_redraw()
+      return
+    end if
 
     ! Use full path (no ~ abbreviation for better navigation)
     working_path = trim(full_path)
