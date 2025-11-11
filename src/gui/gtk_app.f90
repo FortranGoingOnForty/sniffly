@@ -30,6 +30,8 @@ module gtk_app
                                 clear_previous_breadcrumb_path
   use treemap_renderer, only: register_progress_callback, scan_directory, set_redraw_widget, &
                                register_scan_completion_callback
+  use tab_manager, only: tab_state, init_tab_manager, create_tab, get_active_tab, &
+                         switch_to_tab, num_tabs, active_tab_index
   implicit none
   private
 
@@ -175,6 +177,11 @@ contains
     type(c_ptr) :: drawing_area, main_box, toolbar, open_dir_btn, scan_btn, cancel_scan_btn, back_btn, forward_btn, up_btn, open_finder_btn, copy_path_btn, info_btn, toggle_dotfiles_btn, toggle_ext_btn, toggle_render_btn, delete_btn, status_bar, breadcrumb_widget
     character(len=512) :: scan_path
     integer(c_int) :: idle_id
+    integer :: first_tab_index
+
+    ! Initialize tab manager
+    call init_tab_manager()
+    print *, "Tab manager initialized"
 
     ! Create main window
     main_window_ptr = gtk_application_window_new(app)
@@ -204,6 +211,14 @@ contains
       print *, "No directory specified, using home directory: ", trim(scan_path)
       print *, "Click the folder icon to select a different directory"
     end if
+
+    ! Create first tab with initial scan path
+    first_tab_index = create_tab(scan_path)
+    if (first_tab_index < 0) then
+      print *, "ERROR: Failed to create initial tab"
+      return
+    end if
+    print *, "Created initial tab ", first_tab_index, " for: ", trim(scan_path)
 
     ! Create main vertical box (toolbar + treemap)
     main_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0_c_int)
