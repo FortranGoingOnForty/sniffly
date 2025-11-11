@@ -23,6 +23,7 @@ module tab_widget
 
   ! Track button pointers to determine which tab was clicked
   type(c_ptr), dimension(MAX_TABS), save :: tab_buttons = c_null_ptr
+  type(c_ptr), dimension(MAX_TABS), save :: close_buttons = c_null_ptr
 
   ! Tab click callback interface
   abstract interface
@@ -75,7 +76,7 @@ contains
 
   ! Refresh tab bar (rebuild all tab buttons)
   subroutine refresh_tab_bar()
-    type(c_ptr) :: plus_btn, tab_btn, child, next_child
+    type(c_ptr) :: plus_btn, tab_btn, close_btn, tab_container, child, next_child
     type(tab_state), pointer :: tab
     integer :: i
     character(len=256) :: label_text
@@ -96,8 +97,9 @@ contains
       child = next_child
     end do
 
-    ! Clear button pointer array
+    ! Clear button pointer arrays
     tab_buttons(:) = c_null_ptr
+    close_buttons(:) = c_null_ptr
 
     print *, "Cleared old tab bar widgets"
 
@@ -113,12 +115,15 @@ contains
       tab => get_tab(i)
       if (.not. associated(tab)) cycle
 
+      ! Create horizontal container for this tab (label + close button)
+      tab_container = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 2_c_int)
+
       ! Format label as ".../basename"
       label_text = ".../" // trim(tab%label)
 
-      ! Create tab button
+      ! Create tab label button
       tab_btn = gtk_button_new_with_label(trim(label_text)//c_null_char)
-      call gtk_widget_set_size_request(tab_btn, 120_c_int, 28_c_int)
+      call gtk_widget_set_size_request(tab_btn, 110_c_int, 28_c_int)
 
       ! Store button pointer so we can identify which tab was clicked
       tab_buttons(i) = tab_btn
@@ -128,11 +133,27 @@ contains
         call gtk_widget_add_css_class(tab_btn, "active-tab"//c_null_char)
       end if
 
-      ! Connect click handler
+      ! Connect click handler for tab selection
       call g_signal_connect(tab_btn, "clicked"//c_null_char, &
                             c_funloc(on_tab_clicked), c_null_ptr)
 
-      call gtk_box_append(tab_bar_container, tab_btn)
+      call gtk_box_append(tab_container, tab_btn)
+
+      ! Create close button (small × button)
+      close_btn = gtk_button_new_with_label("×"//c_null_char)
+      call gtk_widget_set_size_request(close_btn, 24_c_int, 28_c_int)
+
+      ! Store close button pointer
+      close_buttons(i) = close_btn
+
+      ! Connect click handler for closing tab
+      call g_signal_connect(close_btn, "clicked"//c_null_char, &
+                            c_funloc(on_close_clicked), c_null_ptr)
+
+      call gtk_box_append(tab_container, close_btn)
+
+      ! Add the tab container to the tab bar
+      call gtk_box_append(tab_bar_container, tab_container)
       print *, "Added tab button ", i, ": ", trim(label_text)
     end do
 
@@ -251,6 +272,50 @@ contains
 
     print *, "Switched to tab ", clicked_tab_index
   end subroutine on_tab_clicked
+
+  ! Callback when a close button is clicked
+  subroutine on_close_clicked(button, user_data) bind(c)
+    type(c_ptr), value :: button, user_data
+    integer :: i, clicked_tab_index
+
+    ! Find which close button was clicked
+    clicked_tab_index = -1
+    do i = 1, num_tabs
+      if (c_associated(close_buttons(i), button)) then
+        clicked_tab_index = i
+        exit
+      end if
+    end do
+
+    if (clicked_tab_index == -1) then
+      print *, "WARNING: Could not determine which close button was clicked"
+      return
+    end if
+
+    print *, "Close button clicked for tab ", clicked_tab_index
+
+    ! Prevent closing last tab
+    if (num_tabs <= 1) then
+      print *, "ERROR: Cannot close last tab"
+      return
+    end if
+
+    ! Close the tab
+    call close_tab(clicked_tab_index)
+
+    ! Rebuild tab bar
+    call refresh_tab_bar()
+
+    ! Update visual states
+    call update_tab_visual_states()
+
+    ! Update UI for the new active tab
+    if (associated(tab_switch_cb)) then
+      call tab_switch_cb()
+    end if
+
+    print *, "Tab ", clicked_tab_index, " closed - now ", num_tabs, " tabs remaining"
+  end subroutine on_close_clicked
 
   ! Register tab click callback
   subroutine register_tab_click_callback(callback)
