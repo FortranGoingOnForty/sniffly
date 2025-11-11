@@ -35,7 +35,7 @@ module gtk_app
   public :: sniffly_app_run, sniffly_app_quit, sniffly_set_scan_path, &
             sniffly_update_status, breadcrumb_callback, &
             sniffly_update_progress, sniffly_show_progress, sniffly_hide_progress, &
-            sniffly_update_status_bar_stats
+            sniffly_update_status_bar_stats, get_forward_path
 
   ! Application constants
   character(len=*), parameter :: APP_ID = "org.fortrangoingonforty.sniffly"
@@ -1239,11 +1239,22 @@ contains
     end if
   end function count_files_recursive
 
+  ! Get forward path (if we navigated backwards and there's a forward history)
+  function get_forward_path() result(fwd_path)
+    character(len=512) :: fwd_path
+    fwd_path = ""
+    if (nav_history_pos > 0 .and. nav_history_pos < nav_history_count) then
+      fwd_path = trim(nav_history(nav_history_pos + 1))
+      print *, "Forward path available: ", trim(fwd_path)
+    end if
+  end function get_forward_path
+
   ! Callback wrapper for navigation events (no arguments)
   subroutine breadcrumb_callback()
     use treemap_renderer, only: get_current_view_node
     use types, only: file_node
     type(file_node), pointer :: current_view
+    character(len=512) :: fwd_path
 
     print *, "=== BREADCRUMB_CALLBACK ==="
 
@@ -1253,8 +1264,15 @@ contains
       global_scan_path = trim(current_view%path)
       print *, "  Synced global_scan_path to: ", trim(global_scan_path)
 
-      ! Update breadcrumb widget with new path
-      call update_breadcrumb_cache(trim(current_view%path))
+      ! Get forward path (if available)
+      fwd_path = get_forward_path()
+
+      ! Update breadcrumb widget with new path and forward lookahead
+      if (len_trim(fwd_path) > 0) then
+        call update_breadcrumb_cache(trim(current_view%path), trim(fwd_path))
+      else
+        call update_breadcrumb_cache(trim(current_view%path))
+      end if
     end if
 
     call sniffly_update_status_bar_stats()

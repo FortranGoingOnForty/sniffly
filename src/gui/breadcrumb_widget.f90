@@ -36,6 +36,11 @@ module breadcrumb_widget
   character(len=256), dimension(MAX_SEGMENTS), save :: cached_segment_names = ""
   integer, save :: cached_segment_count = 0
 
+  ! Forward lookahead segments (greyed out continuation when navigating back)
+  character(len=512), dimension(MAX_SEGMENTS), save :: cached_forward_segment_paths = ""
+  character(len=256), dimension(MAX_SEGMENTS), save :: cached_forward_segment_names = ""
+  integer, save :: cached_forward_segment_count = 0
+
   ! Hover state
   integer, save :: hovered_segment = 0  ! 0 = none, 1+ = segment index
   integer, save :: last_hovered_segment = -1
@@ -103,10 +108,11 @@ contains
 
   ! Update cached path segments (called from main thread on navigation events)
   ! This is the ONLY function that modifies cached_segment_*
-  subroutine update_breadcrumb_cache(full_path)
+  subroutine update_breadcrumb_cache(full_path, forward_path)
     character(len=*), intent(in) :: full_path
-    character(len=512) :: working_path
-    integer :: slash_pos, start_pos
+    character(len=*), intent(in), optional :: forward_path
+    character(len=512) :: working_path, fwd_continuation
+    integer :: slash_pos, start_pos, current_len
 
     print *, "Updating breadcrumb cache for: ", trim(full_path)
 
@@ -114,6 +120,9 @@ contains
     cached_segment_count = 0
     cached_segment_paths = ""
     cached_segment_names = ""
+    cached_forward_segment_count = 0
+    cached_forward_segment_paths = ""
+    cached_forward_segment_names = ""
 
     if (len_trim(full_path) == 0) return
 
@@ -177,6 +186,73 @@ contains
     end do
 
     print *, "Breadcrumb cache updated: ", cached_segment_count, " segments"
+
+    ! Parse forward lookahead continuation (if provided)
+    if (present(forward_path) .and. len_trim(forward_path) > 0) then
+      current_len = len_trim(full_path)
+
+      ! Check if forward_path starts with current path
+      if (len_trim(forward_path) > current_len) then
+        if (forward_path(1:current_len) == full_path(1:current_len)) then
+          ! Extract continuation (everything after current path)
+          if (forward_path(current_len+1:current_len+1) == "/") then
+            fwd_continuation = trim(forward_path(current_len+1:))
+          else
+            fwd_continuation = trim(forward_path(current_len:))
+          end if
+
+          print *, "Forward continuation: ", trim(fwd_continuation)
+
+          ! Parse continuation segments (similar to main path parsing)
+          start_pos = 1
+
+          ! Skip leading slashes
+          do while (start_pos <= len_trim(fwd_continuation) .and. &
+                    fwd_continuation(start_pos:start_pos) == "/")
+            start_pos = start_pos + 1
+          end do
+
+          ! Parse forward segments
+          do while (start_pos <= len_trim(fwd_continuation) .and. &
+                    cached_forward_segment_count < MAX_SEGMENTS)
+            ! Skip any leading slashes
+            do while (start_pos <= len_trim(fwd_continuation) .and. &
+                      fwd_continuation(start_pos:start_pos) == "/")
+              start_pos = start_pos + 1
+            end do
+
+            if (start_pos > len_trim(fwd_continuation)) exit
+
+            ! Find next slash
+            slash_pos = index(fwd_continuation(start_pos:), "/")
+
+            if (slash_pos == 0) then
+              ! Last segment
+              cached_forward_segment_count = cached_forward_segment_count + 1
+              cached_forward_segment_paths(cached_forward_segment_count) = trim(forward_path)
+              cached_forward_segment_names(cached_forward_segment_count) = &
+                trim(fwd_continuation(start_pos:))
+              print *, "  Forward segment ", cached_forward_segment_count, ": ", &
+                       trim(cached_forward_segment_names(cached_forward_segment_count))
+              exit
+            else
+              ! Intermediate segment
+              cached_forward_segment_count = cached_forward_segment_count + 1
+              ! Build full path up to this segment
+              cached_forward_segment_paths(cached_forward_segment_count) = &
+                trim(full_path) // trim(fwd_continuation(1:start_pos+slash_pos-2))
+              cached_forward_segment_names(cached_forward_segment_count) = &
+                trim(fwd_continuation(start_pos:start_pos+slash_pos-2))
+              print *, "  Forward segment ", cached_forward_segment_count, ": ", &
+                       trim(cached_forward_segment_names(cached_forward_segment_count))
+              start_pos = start_pos + slash_pos
+            end if
+          end do
+
+          print *, "Forward lookahead: ", cached_forward_segment_count, " segments"
+        end if
+      end if
+    end if
 
     ! Trigger redraw
     call queue_redraw()
@@ -284,6 +360,50 @@ contains
       end if
     end do
 
+    ! Draw forward lookahead segments (greyed out)
+    do i = 1, cached_forward_segment_count
+      ! Offset index for forward segments (after regular segments)
+      ! Use negative indices to distinguish from regular segments
+
+      ! Set greyed out color with transparency
+      call cairo_set_source_rgba(cr, 0.5_c_double, 0.5_c_double, 0.5_c_double, 0.5_c_double)
+      font_desc = pango_font_description_from_string("Sans 11"//c_null_char)
+      call pango_layout_set_font_description(layout, font_desc)
+      call pango_font_description_free(font_desc)
+
+      ! Draw separator before forward segment
+      call cairo_set_source_rgba(cr, 0.5_c_double, 0.5_c_double, 0.5_c_double, 0.5_c_double)
+      font_desc = pango_font_description_from_string("Sans 11"//c_null_char)
+      call pango_layout_set_font_description(layout, font_desc)
+      call pango_font_description_free(font_desc)
+
+      call pango_layout_set_text(layout, trim(separator)//c_null_char, &
+                                  int(len_trim(separator), c_int))
+      call pango_layout_get_pixel_size(layout, c_loc(text_width), c_loc(text_height))
+      call cairo_move_to(cr, real(x_offset, c_double), &
+                         real((height - text_height) / 2, c_double))
+      call pango_cairo_show_layout(cr, layout)
+      x_offset = x_offset + text_width
+
+      ! Draw forward segment name
+      call pango_layout_set_text(layout, trim(cached_forward_segment_names(i))//c_null_char, &
+                                  int(len_trim(cached_forward_segment_names(i)), c_int))
+      call pango_layout_get_pixel_size(layout, c_loc(text_width), c_loc(text_height))
+
+      ! Store bounds for hit-testing (use offset indices: segment count + i)
+      segment_rects(cached_segment_count + i)%x = x_offset
+      segment_rects(cached_segment_count + i)%y = 0
+      segment_rects(cached_segment_count + i)%width = text_width
+      segment_rects(cached_segment_count + i)%height = height
+
+      ! Position and draw text
+      call cairo_move_to(cr, real(x_offset, c_double), &
+                         real((height - text_height) / 2, c_double))
+      call pango_cairo_show_layout(cr, layout)
+
+      x_offset = x_offset + text_width
+    end do
+
     ! Clean up (Pango layout is freed by GTK automatically)
   end subroutine on_draw_breadcrumb
 
@@ -311,25 +431,38 @@ contains
     type(c_ptr), value :: gesture, user_data
     integer(c_int), value :: n_press
     real(c_double), value :: x, y
-    integer :: clicked_segment
+    integer :: clicked_segment, total_segments
     type(file_node), pointer :: current_view
     character(len=:), allocatable :: target_path
 
     ! Find which segment was clicked
     clicked_segment = find_segment_at_position(x, y)
+    total_segments = cached_segment_count + cached_forward_segment_count
 
-    if (clicked_segment > 0 .and. clicked_segment <= cached_segment_count) then
-      ! Don't navigate if clicking the active (last) segment
-      if (clicked_segment == cached_segment_count) then
-        print *, "Clicked active segment - no navigation"
-        return
+    if (clicked_segment > 0 .and. clicked_segment <= total_segments) then
+      ! Check if it's a regular segment or forward segment
+      if (clicked_segment <= cached_segment_count) then
+        ! Regular segment clicked
+        ! Don't navigate if clicking the active (last) segment
+        if (clicked_segment == cached_segment_count .and. cached_forward_segment_count == 0) then
+          print *, "Clicked active segment - no navigation"
+          return
+        end if
+
+        print *, "Breadcrumb clicked: segment ", clicked_segment, " (", &
+                 trim(cached_segment_names(clicked_segment)), ")"
+
+        ! Get the full path for this segment
+        target_path = trim(cached_segment_paths(clicked_segment))
+      else
+        ! Forward segment clicked
+        print *, "Forward breadcrumb clicked: segment ", clicked_segment - cached_segment_count, " (", &
+                 trim(cached_forward_segment_names(clicked_segment - cached_segment_count)), ")"
+
+        ! Get the full path for this forward segment
+        target_path = trim(cached_forward_segment_paths(clicked_segment - cached_segment_count))
       end if
 
-      print *, "Breadcrumb clicked: segment ", clicked_segment, " (", &
-               trim(cached_segment_names(clicked_segment)), ")"
-
-      ! Get the full path for this segment
-      target_path = trim(cached_segment_paths(clicked_segment))
       print *, "Navigating to: ", target_path
 
       ! Scan the target directory
