@@ -23,8 +23,8 @@ module gtk_app
   use g, only: g_application_run, g_idle_add
   use treemap_widget, only: create_treemap_widget, set_scan_path, register_navigation_callback, &
                              register_key_handler, register_quit_callback, register_delete_callback, &
-                             register_refresh_callback, mark_initial_scan_complete, has_selection, &
-                             get_selected_node_path
+                             register_refresh_callback, register_selection_callback, mark_initial_scan_complete, &
+                             has_selection, get_selected_node_path
   use treemap_renderer, only: register_progress_callback, scan_directory, set_redraw_widget, &
                                register_scan_completion_callback
   implicit none
@@ -74,6 +74,12 @@ module gtk_app
   type(c_ptr), save :: back_btn_ptr = c_null_ptr
   type(c_ptr), save :: forward_btn_ptr = c_null_ptr
   type(c_ptr), save :: cancel_scan_btn_ptr = c_null_ptr
+
+  ! Selection-dependent button pointers
+  type(c_ptr), save :: info_btn_ptr = c_null_ptr
+  type(c_ptr), save :: copy_path_btn_ptr = c_null_ptr
+  type(c_ptr), save :: open_finder_btn_ptr = c_null_ptr
+  type(c_ptr), save :: delete_btn_ptr = c_null_ptr
 
 contains
 
@@ -271,6 +277,9 @@ contains
     ! Initialize Cancel Scan button state (disabled and grey until scan starts)
     call update_cancel_scan_button_state()
 
+    ! Initialize selection-dependent button states (disabled until selection exists)
+    call update_selection_buttons()
+
     ! Create progress bar (always visible but starts at 0%)
     ! Place it in toolbar, expanded to fill remaining space (pushes to right)
     progress_bar_ptr = gtk_progress_bar_new()
@@ -286,6 +295,7 @@ contains
     call g_signal_connect(open_finder_btn, "clicked"//c_null_char, &
                            c_funloc(on_open_finder_clicked), c_null_ptr)
     call gtk_box_append(toolbar, open_finder_btn)
+    open_finder_btn_ptr = open_finder_btn  ! Store for enabling/disabling
 
     ! Create Copy Path button
     copy_path_btn = gtk_button_new()
@@ -294,6 +304,7 @@ contains
     call g_signal_connect(copy_path_btn, "clicked"//c_null_char, &
                            c_funloc(on_copy_path_clicked), c_null_ptr)
     call gtk_box_append(toolbar, copy_path_btn)
+    copy_path_btn_ptr = copy_path_btn  ! Store for enabling/disabling
 
     ! Create Properties/Info button
     info_btn = gtk_button_new()
@@ -302,6 +313,7 @@ contains
     call g_signal_connect(info_btn, "clicked"//c_null_char, &
                            c_funloc(on_info_clicked), c_null_ptr)
     call gtk_box_append(toolbar, info_btn)
+    info_btn_ptr = info_btn  ! Store for enabling/disabling
 
     ! View Toggle Buttons (Phase 3 & 5 features)
 
@@ -336,6 +348,7 @@ contains
     call g_signal_connect(delete_btn, "clicked"//c_null_char, &
                            c_funloc(on_delete_clicked), c_null_ptr)
     call gtk_box_append(toolbar, delete_btn)
+    delete_btn_ptr = delete_btn  ! Store for enabling/disabling
 
     ! Add toolbar to main box
     call gtk_box_append(main_box, toolbar)
@@ -382,6 +395,10 @@ contains
 
     ! Register force refresh callback
     call register_refresh_callback(refresh_callback_wrapper)
+
+    ! Register selection change callback for button state updates
+    call register_selection_callback(update_selection_buttons)
+    print *, "Selection callback registered"
 
     ! Register progress callbacks
     call register_progress_callback(sniffly_show_progress, sniffly_hide_progress, &
@@ -589,16 +606,16 @@ contains
       return
     end if
 
-    ! Get the selected child index
+    ! Get the selected child index (1-based: 1 = first child, 2 = second child, etc.)
     selected_idx = get_selected_index()
-    if (selected_idx < 0 .or. selected_idx >= view_node%num_children) then
+    if (selected_idx < 1 .or. selected_idx > view_node%num_children) then
       call sniffly_update_status("Invalid selection")
       return
     end if
 
-    ! Get details from selected child (1-indexed in Fortran)
-    size_bytes = view_node%children(selected_idx + 1)%size
-    item_count = view_node%children(selected_idx + 1)%num_children
+    ! Get details from selected child (selected_idx is already 1-based)
+    size_bytes = view_node%children(selected_idx)%size
+    item_count = view_node%children(selected_idx)%num_children
 
     ! Format size
     if (size_bytes < 1024_int64) then
@@ -612,12 +629,12 @@ contains
     end if
 
     ! Build info text for status bar
-    if (view_node%children(selected_idx + 1)%is_directory) then
-      write(info_text, '(A,A,A,A,A,I0,A)') &
-        trim(view_node%children(selected_idx + 1)%name), ' | ', trim(size_str), ' | ', item_count, ' items'
+    if (view_node%children(selected_idx)%is_directory) then
+      write(info_text, '(A,A,A,A,I0,A)') &
+        trim(view_node%children(selected_idx)%name), ' | ', trim(size_str), ' | ', item_count, ' items'
     else
       write(info_text, '(A,A,A,A)') &
-        trim(view_node%children(selected_idx + 1)%name), ' | ', trim(size_str), ' | File'
+        trim(view_node%children(selected_idx)%name), ' | ', trim(size_str), ' | File'
     end if
 
     ! Show properties in status bar
@@ -685,6 +702,36 @@ contains
       call gtk_widget_set_sensitive(cancel_scan_btn_ptr, 0_c_int)
     end if
   end subroutine update_cancel_scan_button_state
+
+  ! Helper: Update selection-dependent button states
+  subroutine update_selection_buttons()
+    use gtk, only: gtk_widget_set_sensitive
+    logical :: has_sel
+
+    ! Guard against accessing widgets during shutdown
+    if (app_is_shutting_down) return
+    if (.not. c_associated(info_btn_ptr)) return
+
+    ! Check if there's a selection
+    has_sel = has_selection()
+
+    print *, "DEBUG: update_selection_buttons() called, has_selection =", has_sel
+
+    ! Enable/disable all selection-dependent buttons
+    if (has_sel) then
+      print *, "DEBUG:   Enabling selection-dependent buttons"
+      call gtk_widget_set_sensitive(info_btn_ptr, 1_c_int)
+      call gtk_widget_set_sensitive(copy_path_btn_ptr, 1_c_int)
+      call gtk_widget_set_sensitive(open_finder_btn_ptr, 1_c_int)
+      call gtk_widget_set_sensitive(delete_btn_ptr, 1_c_int)
+    else
+      print *, "DEBUG:   Disabling selection-dependent buttons"
+      call gtk_widget_set_sensitive(info_btn_ptr, 0_c_int)
+      call gtk_widget_set_sensitive(copy_path_btn_ptr, 0_c_int)
+      call gtk_widget_set_sensitive(open_finder_btn_ptr, 0_c_int)
+      call gtk_widget_set_sensitive(delete_btn_ptr, 0_c_int)
+    end if
+  end subroutine update_selection_buttons
 
   ! Helper: Add path to navigation history
   subroutine add_to_history(path)
