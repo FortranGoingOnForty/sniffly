@@ -1016,8 +1016,16 @@ contains
 
     print *, "  Updating breadcrumb for: ", trim(current_view%path)
 
-    ! Update breadcrumb cache
-    call update_breadcrumb_cache(trim(current_view%path))
+    ! Update breadcrumb cache (with forward lookahead if available)
+    block
+      character(len=512) :: fwd_path
+      fwd_path = get_forward_path()
+      if (len_trim(fwd_path) > 0) then
+        call update_breadcrumb_cache(trim(current_view%path), trim(fwd_path))
+      else
+        call update_breadcrumb_cache(trim(current_view%path))
+      end if
+    end block
 
     ! Trigger treemap redraw
     if (c_associated(drawing_area_ptr)) then
@@ -2226,9 +2234,17 @@ contains
     ! Invalidate layout to force recalculation
     call invalidate_layout()
 
-    ! Update breadcrumbs after scan (use pending_scan_path)
+    ! Update breadcrumbs after scan (use pending_scan_path with forward lookahead if available)
     if (len_trim(pending_scan_path) > 0) then
-      call update_breadcrumb_cache(trim(pending_scan_path))
+      block
+        character(len=512) :: fwd_path
+        fwd_path = get_forward_path()
+        if (len_trim(fwd_path) > 0) then
+          call update_breadcrumb_cache(trim(pending_scan_path), trim(fwd_path))
+        else
+          call update_breadcrumb_cache(trim(pending_scan_path))
+        end if
+      end block
     end if
 
     ! Update status bar with file statistics
