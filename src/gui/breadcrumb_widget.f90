@@ -262,22 +262,25 @@ contains
       ! Update offset
       x_offset = x_offset + text_width
 
-      ! Draw separator (if not last segment)
+      ! Draw separator (if not last segment and not after root "/")
       if (i < cached_segment_count) then
-        ! Set separator color (gray)
-        call cairo_set_source_rgb(cr, 0.5_c_double, 0.5_c_double, 0.5_c_double)
-        font_desc = pango_font_description_from_string("Sans 11"//c_null_char)
-        call pango_layout_set_font_description(layout, font_desc)
-        call pango_font_description_free(font_desc)
+        ! Skip separator after root "/" segment
+        if (i /= 1 .or. trim(cached_segment_names(1)) /= "/") then
+          ! Set separator color (gray)
+          call cairo_set_source_rgb(cr, 0.5_c_double, 0.5_c_double, 0.5_c_double)
+          font_desc = pango_font_description_from_string("Sans 11"//c_null_char)
+          call pango_layout_set_font_description(layout, font_desc)
+          call pango_font_description_free(font_desc)
 
-        call pango_layout_set_text(layout, trim(separator)//c_null_char, &
-                                    int(len_trim(separator), c_int))
-        call pango_layout_get_pixel_size(layout, c_loc(text_width), c_loc(text_height))
-        call cairo_move_to(cr, real(x_offset, c_double), &
-                           real((height - text_height) / 2, c_double))
-        call pango_cairo_show_layout(cr, layout)
+          call pango_layout_set_text(layout, trim(separator)//c_null_char, &
+                                      int(len_trim(separator), c_int))
+          call pango_layout_get_pixel_size(layout, c_loc(text_width), c_loc(text_height))
+          call cairo_move_to(cr, real(x_offset, c_double), &
+                             real((height - text_height) / 2, c_double))
+          call pango_cairo_show_layout(cr, layout)
 
-        x_offset = x_offset + text_width
+          x_offset = x_offset + text_width
+        end if
       end if
     end do
 
