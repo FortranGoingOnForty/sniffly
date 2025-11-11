@@ -718,33 +718,43 @@ contains
   subroutine update_history_buttons()
     use gtk, only: gtk_widget_set_sensitive
     use progressive_scanner, only: is_scan_active
+    type(tab_state), pointer :: tab
     logical :: scan_active
 
     ! Guard against accessing widgets during shutdown
     if (app_is_shutting_down) return
     if (.not. c_associated(back_btn_ptr) .or. .not. c_associated(forward_btn_ptr)) return
 
+    ! Get active tab
+    tab => get_active_tab()
+    if (.not. associated(tab)) then
+      ! No active tab - disable buttons
+      call gtk_widget_set_sensitive(back_btn_ptr, 0_c_int)
+      call gtk_widget_set_sensitive(forward_btn_ptr, 0_c_int)
+      return
+    end if
+
     ! Check if scan is active - disable buttons during scan
     scan_active = is_scan_active()
 
     print *, "=== UPDATE_HISTORY_BUTTONS ==="
-    print *, "  pos=", nav_history_pos, " count=", nav_history_count, " scan_active=", scan_active
+    print *, "  pos=", tab%nav_history_pos, " count=", tab%nav_history_count, " scan_active=", scan_active
 
     ! Enable Back if we're not at the start of history AND scan is not active
-    if (nav_history_pos > 1 .and. .not. scan_active) then
+    if (tab%nav_history_pos > 1 .and. .not. scan_active) then
       print *, "  Enabling Back (pos > 1 and scan not active)"
       call gtk_widget_set_sensitive(back_btn_ptr, 1_c_int)
     else
-      print *, "  Disabling Back (pos=", nav_history_pos, " or scan active)"
+      print *, "  Disabling Back (pos=", tab%nav_history_pos, " or scan active)"
       call gtk_widget_set_sensitive(back_btn_ptr, 0_c_int)
     end if
 
     ! Enable Forward if we're not at the end of history AND scan is not active
-    if (nav_history_pos > 0 .and. nav_history_pos < nav_history_count .and. .not. scan_active) then
+    if (tab%nav_history_pos > 0 .and. tab%nav_history_pos < tab%nav_history_count .and. .not. scan_active) then
       print *, "  Enabling Forward (pos < count and scan not active)"
       call gtk_widget_set_sensitive(forward_btn_ptr, 1_c_int)
     else
-      print *, "  Disabling Forward (pos=", nav_history_pos, " count=", nav_history_count, " or scan active)"
+      print *, "  Disabling Forward (pos=", tab%nav_history_pos, " count=", tab%nav_history_count, " or scan active)"
       call gtk_widget_set_sensitive(forward_btn_ptr, 0_c_int)
     end if
   end subroutine update_history_buttons
@@ -996,9 +1006,18 @@ contains
   subroutine on_back_clicked(button, user_data) bind(c)
     use progressive_scanner, only: is_scan_active
     type(c_ptr), value :: button, user_data
+    type(tab_state), pointer :: tab
 
     print *, "=== BACK BUTTON CLICKED ==="
-    print *, "  Before: pos=", nav_history_pos, " count=", nav_history_count
+
+    ! Get active tab
+    tab => get_active_tab()
+    if (.not. associated(tab)) then
+      print *, "ERROR: No active tab in on_back_clicked"
+      return
+    end if
+
+    print *, "  Before: pos=", tab%nav_history_pos, " count=", tab%nav_history_count
 
     ! Block navigation if scan is active
     if (is_scan_active()) then
@@ -1006,17 +1025,17 @@ contains
       return
     end if
 
-    if (nav_history_pos > 1) then
-      nav_history_pos = nav_history_pos - 1
-      global_scan_path = trim(nav_history(nav_history_pos))
-      print *, "  Moving back to pos=", nav_history_pos
-      print *, "  Path: ", trim(global_scan_path)
-      navigating_history = .true.  ! Set flag before triggering rescan
-      call set_scan_path(trim(global_scan_path))
-      call update_path_entry(trim(global_scan_path))
-      call trigger_rescan(global_scan_path)
+    if (tab%nav_history_pos > 1) then
+      tab%nav_history_pos = tab%nav_history_pos - 1
+      tab%scan_path = trim(tab%nav_history(tab%nav_history_pos))
+      print *, "  Moving back to pos=", tab%nav_history_pos
+      print *, "  Path: ", trim(tab%scan_path)
+      tab%navigating_history = .true.  ! Set flag before triggering rescan
+      call set_scan_path(trim(tab%scan_path))
+      call update_path_entry(trim(tab%scan_path))
+      call trigger_rescan(tab%scan_path)
       call update_history_buttons()
-      call sniffly_update_status("Navigated back to: " // trim(global_scan_path))
+      call sniffly_update_status("Navigated back to: " // trim(tab%scan_path))
     end if
   end subroutine on_back_clicked
 
@@ -1024,10 +1043,19 @@ contains
   subroutine on_forward_clicked(button, user_data) bind(c)
     use progressive_scanner, only: is_scan_active
     type(c_ptr), value :: button, user_data
+    type(tab_state), pointer :: tab
     logical :: is_synthetic
 
     print *, "=== FORWARD BUTTON CLICKED ==="
-    print *, "  Before: pos=", nav_history_pos, " count=", nav_history_count
+
+    ! Get active tab
+    tab => get_active_tab()
+    if (.not. associated(tab)) then
+      print *, "ERROR: No active tab in on_forward_clicked"
+      return
+    end if
+
+    print *, "  Before: pos=", tab%nav_history_pos, " count=", tab%nav_history_count
 
     ! Block navigation if scan is active
     if (is_scan_active()) then
@@ -1035,29 +1063,29 @@ contains
       return
     end if
 
-    if (nav_history_pos > 0 .and. nav_history_pos < nav_history_count) then
-      nav_history_pos = nav_history_pos + 1
-      global_scan_path = trim(nav_history(nav_history_pos))
-      print *, "  Moving forward to pos=", nav_history_pos
-      print *, "  Path: ", trim(global_scan_path)
+    if (tab%nav_history_pos > 0 .and. tab%nav_history_pos < tab%nav_history_count) then
+      tab%nav_history_pos = tab%nav_history_pos + 1
+      tab%scan_path = trim(tab%nav_history(tab%nav_history_pos))
+      print *, "  Moving forward to pos=", tab%nav_history_pos
+      print *, "  Path: ", trim(tab%scan_path)
 
-      navigating_history = .true.  ! Set flag before triggering rescan
+      tab%navigating_history = .true.  ! Set flag before triggering rescan
 
       ! Check if this is a synthetic path (grouped small files node)
-      is_synthetic = (index(global_scan_path, '[') > 0 .and. &
-                      index(global_scan_path, 'small files]') > 0)
+      is_synthetic = (index(tab%scan_path, '[') > 0 .and. &
+                      index(tab%scan_path, 'small files]') > 0)
 
       if (is_synthetic) then
         print *, "  Synthetic path detected - navigating by tree traversal"
-        call navigate_to_synthetic_path(global_scan_path)
+        call navigate_to_synthetic_path(tab%scan_path)
       else
-        call set_scan_path(trim(global_scan_path))
-        call update_path_entry(trim(global_scan_path))
-        call trigger_rescan(global_scan_path)
+        call set_scan_path(trim(tab%scan_path))
+        call update_path_entry(trim(tab%scan_path))
+        call trigger_rescan(tab%scan_path)
       end if
 
       call update_history_buttons()
-      call sniffly_update_status("Navigated forward to: " // trim(global_scan_path))
+      call sniffly_update_status("Navigated forward to: " // trim(tab%scan_path))
     end if
   end subroutine on_forward_clicked
 
