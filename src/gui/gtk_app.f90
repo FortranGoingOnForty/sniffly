@@ -80,6 +80,11 @@ module gtk_app
   type(c_ptr), save :: open_finder_btn_ptr = c_null_ptr
   type(c_ptr), save :: delete_btn_ptr = c_null_ptr
 
+  ! Pending navigation state for synthetic paths
+  logical, save :: pending_synthetic_nav = .false.
+  character(len=512), save :: pending_synthetic_child_name = ""
+  integer, save :: synthetic_nav_attempts = 0  ! Count attempts to avoid infinite loops
+
 contains
 
   ! Run the Sniffly GTK application
@@ -803,6 +808,121 @@ contains
     call update_history_buttons()
   end subroutine add_to_history
 
+  ! Navigate to a synthetic path (grouped small files node) by tree traversal
+  subroutine navigate_to_synthetic_path(synthetic_path)
+    use treemap_renderer, only: scan_directory
+    character(len=*), intent(in) :: synthetic_path
+    character(len=512) :: parent_path, node_name
+    integer :: last_sep, i
+
+    ! Extract parent path and node name
+    last_sep = 0
+    do i = len_trim(synthetic_path), 1, -1
+      if (synthetic_path(i:i) == '/') then
+        last_sep = i
+        exit
+      end if
+    end do
+
+    if (last_sep > 0) then
+      parent_path = synthetic_path(1:last_sep-1)
+      node_name = synthetic_path(last_sep+1:len_trim(synthetic_path))
+    else
+      print *, "ERROR: Invalid synthetic path format"
+      return
+    end if
+
+    print *, "  Parent path: ", trim(parent_path)
+    print *, "  Node name: ", trim(node_name)
+
+    ! Set up pending navigation
+    pending_synthetic_nav = .true.
+    pending_synthetic_child_name = trim(node_name)
+
+    ! Navigate to parent directory - after scan completes, breadcrumb_callback will handle navigation
+    call set_scan_path(trim(parent_path))
+    call update_path_entry(trim(parent_path))
+    call trigger_rescan(parent_path)
+    call sniffly_update_status("Navigating to grouped files...")
+  end subroutine navigate_to_synthetic_path
+
+  ! Complete pending synthetic navigation (called after scan completes)
+  subroutine complete_synthetic_navigation()
+    use treemap_renderer, only: get_current_view_node, navigate_into_node, invalidate_layout
+    use treemap_widget, only: get_widget_ptr
+    use gtk, only: gtk_widget_queue_draw
+    use types, only: file_node
+    type(file_node), pointer :: view_node
+    type(c_ptr) :: widget
+    integer :: i
+
+    if (.not. pending_synthetic_nav) return
+
+    synthetic_nav_attempts = synthetic_nav_attempts + 1
+    print *, "=== COMPLETING SYNTHETIC NAVIGATION (attempt ", synthetic_nav_attempts, ") ==="
+    print *, "  Looking for child: ", trim(pending_synthetic_child_name)
+
+    view_node => get_current_view_node()
+    if (.not. associated(view_node)) then
+      print *, "ERROR: No current view node"
+      pending_synthetic_nav = .false.
+      synthetic_nav_attempts = 0
+      return
+    end if
+
+    if (.not. allocated(view_node%children)) then
+      print *, "ERROR: Current node has no children"
+      pending_synthetic_nav = .false.
+      synthetic_nav_attempts = 0
+      return
+    end if
+
+    print *, "  Current view has ", view_node%num_children, " children"
+
+    ! If we have way too many children, grouping hasn't happened yet - wait for next callback
+    if (view_node%num_children > 100 .and. synthetic_nav_attempts < 5) then
+      print *, "  Too many children (", view_node%num_children, ") - grouping not done yet, waiting..."
+      return  ! Keep pending flag true, will retry on next callback
+    end if
+
+    ! Find child with matching name
+    do i = 1, view_node%num_children
+      if (allocated(view_node%children(i)%name)) then
+        if (trim(view_node%children(i)%name) == trim(pending_synthetic_child_name)) then
+          print *, "  Found child at index ", i, ": '", trim(view_node%children(i)%name), "'"
+          ! Navigate into the child
+          call navigate_into_node(i)
+
+          ! Update UI
+          call invalidate_layout()
+          widget = get_widget_ptr()
+          if (c_associated(widget)) then
+            call gtk_widget_queue_draw(widget)
+          end if
+
+          ! Trigger breadcrumb update
+          call breadcrumb_callback()
+
+          pending_synthetic_nav = .false.
+          synthetic_nav_attempts = 0
+          call sniffly_update_status("Navigated to grouped files")
+          return
+        end if
+      end if
+    end do
+
+    ! Give up after several attempts
+    if (synthetic_nav_attempts >= 5) then
+      print *, "ERROR: Could not find child after ", synthetic_nav_attempts, " attempts"
+      print *, "  Searched for: '", trim(pending_synthetic_child_name), "'"
+      pending_synthetic_nav = .false.
+      synthetic_nav_attempts = 0
+      call sniffly_update_status("Could not find grouped files node")
+    else
+      print *, "  Child not found yet, will retry on next callback"
+    end if
+  end subroutine complete_synthetic_navigation
+
   ! Callback when Back button is clicked
   subroutine on_back_clicked(button, user_data) bind(c)
     use progressive_scanner, only: is_scan_active
@@ -834,6 +954,7 @@ contains
   subroutine on_forward_clicked(button, user_data) bind(c)
     use progressive_scanner, only: is_scan_active
     type(c_ptr), value :: button, user_data
+    logical :: is_synthetic
 
     print *, "=== FORWARD BUTTON CLICKED ==="
     print *, "  Before: pos=", nav_history_pos, " count=", nav_history_count
@@ -849,9 +970,20 @@ contains
       global_scan_path = trim(nav_history(nav_history_pos))
       print *, "  Moving forward to pos=", nav_history_pos
       print *, "  Path: ", trim(global_scan_path)
-      call set_scan_path(trim(global_scan_path))
-      call update_path_entry(trim(global_scan_path))
-      call trigger_rescan(global_scan_path)
+
+      ! Check if this is a synthetic path (grouped small files node)
+      is_synthetic = (index(global_scan_path, '[') > 0 .and. &
+                      index(global_scan_path, 'small files]') > 0)
+
+      if (is_synthetic) then
+        print *, "  Synthetic path detected - navigating by tree traversal"
+        call navigate_to_synthetic_path(global_scan_path)
+      else
+        call set_scan_path(trim(global_scan_path))
+        call update_path_entry(trim(global_scan_path))
+        call trigger_rescan(global_scan_path)
+      end if
+
       call update_history_buttons()
       call sniffly_update_status("Navigated forward to: " // trim(global_scan_path))
     end if
@@ -1546,6 +1678,12 @@ contains
     ! Re-enable back/forward buttons if there's history
     print *, "=== RE-ENABLING NAVIGATION BUTTONS ==="
     call update_history_buttons()
+
+    ! Complete any pending synthetic navigation
+    if (pending_synthetic_nav) then
+      print *, "=== PENDING SYNTHETIC NAV - COMPLETING ==="
+      call complete_synthetic_navigation()
+    end if
   end subroutine scan_complete_callback_wrapper
 
   ! Trigger a rescan of the given directory (for UI buttons)
