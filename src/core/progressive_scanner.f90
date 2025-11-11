@@ -210,12 +210,20 @@ contains
     scan_state%dirs_scanned = scan_state%dirs_scanned + 1
     scan_state%progress = get_scan_progress()
 
-    ! Trigger update callback
+    ! Check if we should stop before calling UI update callback
+    if (.not. scan_state%active) then
+      print *, "Progressive scan stopped - skipping callback"
+      scan_idle_id = 0_c_int
+      continue = 0_c_int
+      return
+    end if
+
+    ! Trigger update callback (only if still active)
     if (associated(update_callback)) then
       call update_callback()
     end if
 
-    ! Check again if we should stop (app might have closed during scan_single_directory)
+    ! Check again if we should stop (app might have closed during callback)
     if (.not. scan_state%active) then
       print *, "Progressive scan stopped mid-callback"
       scan_idle_id = 0_c_int
@@ -257,12 +265,17 @@ contains
     integer(int64) :: file_size
     type(file_node), dimension(:), allocatable :: temp_children
 
+    ! Check if scan has been stopped before doing any work
+    if (.not. scan_state%active) return
+
     print *, "Scanning: ", trim(path), " (depth=", depth, ")"
 
     ! List directory contents
     num_entries = list_directory(path, entries, 10000)
     print *, "  Found ", num_entries, " entries"
 
+    ! Check again after potentially slow list_directory call
+    if (.not. scan_state%active) return
     if (.not. associated(scan_state%root)) return
 
     ! For root directory (depth 0), build the children array
@@ -270,6 +283,8 @@ contains
       ! Count valid entries (non-symlinks, respect hidden file setting)
       child_count = 0
       do i = 1, num_entries
+        ! Check if scan was stopped (allows quick exit)
+        if (.not. scan_state%active) return
         if (len_trim(entries(i)) == 0) cycle
         ! Skip hidden files if show_hidden_files is false
         if (.not. show_hidden_files .and. is_hidden_file(entries(i))) cycle
@@ -288,6 +303,11 @@ contains
 
         ! Create child nodes and track which array index each child gets
         do i = 1, num_entries
+          ! Check if scan was stopped (allows quick exit)
+          if (.not. scan_state%active) then
+            if (allocated(temp_children)) deallocate(temp_children)
+            return
+          end if
           if (len_trim(entries(i)) == 0) cycle
           ! Skip hidden files if show_hidden_files is false
           if (.not. show_hidden_files .and. is_hidden_file(entries(i))) cycle
@@ -350,6 +370,8 @@ contains
     else
       ! For subdirectories (depth > 0), accumulate sizes by matching path prefixes
       do i = 1, num_entries
+        ! Check if scan was stopped (allows quick exit)
+        if (.not. scan_state%active) return
         if (len_trim(entries(i)) == 0) cycle
         ! Skip hidden files if show_hidden_files is false
         if (.not. show_hidden_files .and. is_hidden_file(entries(i))) cycle
