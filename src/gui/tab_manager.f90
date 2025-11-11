@@ -9,7 +9,7 @@ module tab_manager
 
   public :: tab_state, tabs, active_tab_index, num_tabs, MAX_TABS, MAX_HISTORY
   public :: init_tab_manager, create_tab, close_tab, switch_to_tab
-  public :: get_active_tab, get_tab
+  public :: get_active_tab, get_tab, get_path_basename
 
   ! Constants
   integer, parameter :: MAX_TABS = 5
