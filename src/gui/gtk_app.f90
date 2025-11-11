@@ -95,6 +95,16 @@ module gtk_app
   character(len=512), save :: pending_synthetic_child_name = ""
   integer, save :: synthetic_nav_attempts = 0  ! Count attempts to avoid infinite loops
 
+  ! C interface for macOS native file picker
+  interface
+    function macos_show_folder_picker(output_path, max_len) bind(c, name='macos_show_folder_picker')
+      import :: c_char, c_int
+      character(kind=c_char), dimension(*) :: output_path
+      integer(c_int), value :: max_len
+      integer(c_int) :: macos_show_folder_picker
+    end function macos_show_folder_picker
+  end interface
+
 contains
 
   ! Run the Sniffly GTK application
@@ -540,13 +550,14 @@ contains
   end subroutine load_custom_css
 
   ! Callback when Open Directory button is clicked
-  ! NOTE: Uses system command for file picking until GTK4 file dialog bindings are available
+  ! Uses native macOS NSOpenPanel for fast, focus-preserving file picker
   subroutine on_open_dir_clicked(button, user_data) bind(c)
     type(c_ptr), value :: button, user_data
     type(tab_state), pointer :: tab
+    character(kind=c_char, len=1024) :: c_path
     character(len=1024) :: selected_path
-    integer :: status
-    integer(c_int) :: idle_id
+    integer(c_int) :: status
+    integer :: i, path_len
 
     print *, "Open Directory button clicked!"
 
@@ -557,34 +568,37 @@ contains
       return
     end if
 
-    ! Call helper to show native file picker
-    call show_native_directory_picker(selected_path, status)
+    ! Call native macOS file picker (modal, maintains focus)
+    status = macos_show_folder_picker(c_path, int(len(c_path), c_int))
 
-    if (status == 0 .and. len_trim(selected_path) > 0) then
-      ! Restore window focus after dialog using idle callback
-      ! (deferred to let macOS finish cleaning up osascript dialog)
-      if (c_associated(main_window_ptr)) then
-        idle_id = g_idle_add(c_funloc(restore_window_focus), c_null_ptr)
+    if (status == 0) then
+      ! Convert C string to Fortran string
+      path_len = 0
+      do i = 1, len(c_path)
+        if (c_path(i:i) == c_null_char) exit
+        path_len = i
+      end do
+
+      if (path_len > 0) then
+        selected_path = c_path(1:path_len)
+        print *, "Selected directory: ", trim(selected_path)
+
+        ! Update tab scan path (but don't scan yet)
+        ! Remove trailing slash if present (C code doesn't like it)
+        if (len_trim(selected_path) > 1 .and. &
+            selected_path(len_trim(selected_path):len_trim(selected_path)) == '/') then
+          tab%scan_path = trim(selected_path(1:len_trim(selected_path)-1))
+        else
+          tab%scan_path = trim(selected_path)
+        end if
+
+        call set_scan_path(trim(tab%scan_path))
+        call update_path_entry(trim(tab%scan_path))
+
+        print *, "Path updated. Click Scan button to scan: ", trim(tab%scan_path)
       end if
-      print *, "Selected directory: ", trim(selected_path)
-
-      ! Update tab scan path (but don't scan yet)
-      ! Remove trailing slash if present (C code doesn't like it)
-      if (len_trim(selected_path) > 1 .and. selected_path(len_trim(selected_path):len_trim(selected_path)) == '/') then
-        tab%scan_path = trim(selected_path(1:len_trim(selected_path)-1))
-        print *, "DEBUG: Removed trailing slash from path"
-      else
-        tab%scan_path = trim(selected_path)
-      end if
-      print *, "DEBUG: Set tab scan_path to: '", trim(tab%scan_path), "'"
-      call set_scan_path(trim(tab%scan_path))
-
-      ! Update path display entry
-      call update_path_entry(trim(tab%scan_path))
-
-      print *, "Path updated. Click Scan button to scan: ", trim(tab%scan_path)
     else
-      print *, "Directory selection cancelled or failed"
+      print *, "Directory selection cancelled"
     end if
   end subroutine on_open_dir_clicked
 
