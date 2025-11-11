@@ -25,13 +25,15 @@ module gtk_app
                              register_key_handler, register_quit_callback, register_delete_callback, &
                              register_refresh_callback, register_selection_callback, mark_initial_scan_complete, &
                              has_selection, get_selected_node_path
+  use breadcrumb_widget, only: create_breadcrumb_widget, update_breadcrumb_cache, &
+                                set_navigation_callback
   use treemap_renderer, only: register_progress_callback, scan_directory, set_redraw_widget, &
                                register_scan_completion_callback
   implicit none
   private
 
   public :: sniffly_app_run, sniffly_app_quit, sniffly_set_scan_path, &
-            sniffly_update_status, sniffly_update_breadcrumbs, breadcrumb_callback, &
+            sniffly_update_status, breadcrumb_callback, &
             sniffly_update_progress, sniffly_show_progress, sniffly_hide_progress, &
             sniffly_update_status_bar_stats
 
@@ -45,14 +47,8 @@ module gtk_app
   type(c_ptr), save :: app_ptr = c_null_ptr
   type(c_ptr), save :: main_window_ptr = c_null_ptr
   type(c_ptr), save :: status_label_ptr = c_null_ptr
-  type(c_ptr), save :: breadcrumb_box_ptr = c_null_ptr  ! Container for breadcrumb buttons
   type(c_ptr), save :: progress_bar_ptr = c_null_ptr
   type(c_ptr), save :: path_entry_ptr = c_null_ptr
-
-  ! Breadcrumb button storage (max 50 path segments)
-  integer, parameter :: MAX_BREADCRUMB_SEGMENTS = 50
-  type(c_ptr), dimension(MAX_BREADCRUMB_SEGMENTS), save :: breadcrumb_buttons = c_null_ptr
-  integer, save :: breadcrumb_count = 0
 
   ! Shutdown flag - set when app is closing to prevent widget access
   logical, save :: app_is_shutting_down = .false.
@@ -125,13 +121,11 @@ contains
     ! Nullify all widget pointers to prevent access after destruction
     main_window_ptr = c_null_ptr
     status_label_ptr = c_null_ptr
-    breadcrumb_box_ptr = c_null_ptr
     progress_bar_ptr = c_null_ptr
     path_entry_ptr = c_null_ptr
     back_btn_ptr = c_null_ptr
     forward_btn_ptr = c_null_ptr
     cancel_scan_btn_ptr = c_null_ptr
-    breadcrumb_buttons = c_null_ptr
   end subroutine sniffly_app_quit
 
   ! Set the directory path to scan (call before sniffly_app_run)
@@ -158,12 +152,10 @@ contains
     ! Nullify all widget pointers to prevent access after destruction
     ! (The window will be destroyed by GTK after we return FALSE)
     status_label_ptr = c_null_ptr
-    breadcrumb_box_ptr = c_null_ptr
     progress_bar_ptr = c_null_ptr
     path_entry_ptr = c_null_ptr
     back_btn_ptr = c_null_ptr
     forward_btn_ptr = c_null_ptr
-    breadcrumb_buttons = c_null_ptr
     main_window_ptr = c_null_ptr
 
     ! Return FALSE (0) to allow the window to close
@@ -173,7 +165,7 @@ contains
   ! Callback when application activates (startup)
   subroutine on_activate(app, user_data) bind(c)
     type(c_ptr), value :: app, user_data
-    type(c_ptr) :: drawing_area, main_box, toolbar, open_dir_btn, scan_btn, cancel_scan_btn, back_btn, forward_btn, up_btn, open_finder_btn, copy_path_btn, info_btn, toggle_dotfiles_btn, toggle_ext_btn, toggle_render_btn, delete_btn, status_bar, breadcrumb_bar
+    type(c_ptr) :: drawing_area, main_box, toolbar, open_dir_btn, scan_btn, cancel_scan_btn, back_btn, forward_btn, up_btn, open_finder_btn, copy_path_btn, info_btn, toggle_dotfiles_btn, toggle_ext_btn, toggle_render_btn, delete_btn, status_bar, breadcrumb_widget
     character(len=512) :: scan_path
     integer(c_int) :: idle_id
 
@@ -352,15 +344,18 @@ contains
     ! Add toolbar to main box
     call gtk_box_append(main_box, toolbar)
 
-    ! Create breadcrumb bar (horizontal box for clickable path segments)
-    breadcrumb_bar = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0_c_int)  ! No spacing, buttons touch
-    call gtk_widget_set_halign(breadcrumb_bar, GTK_ALIGN_START)
+    ! Create custom Cairo breadcrumb widget
+    breadcrumb_widget = create_breadcrumb_widget()
+    if (.not. c_associated(breadcrumb_widget)) then
+      print *, "ERROR: Failed to create breadcrumb widget"
+      return
+    end if
 
-    ! Store the box pointer for dynamic button updates
-    breadcrumb_box_ptr = breadcrumb_bar
+    ! Register navigation callback for breadcrumb
+    call set_navigation_callback(breadcrumb_callback)
 
-    ! Add breadcrumb bar to main box
-    call gtk_box_append(main_box, breadcrumb_bar)
+    ! Add breadcrumb widget to main box
+    call gtk_box_append(main_box, breadcrumb_widget)
 
     ! Create treemap drawing area widget
     drawing_area = create_treemap_widget()
