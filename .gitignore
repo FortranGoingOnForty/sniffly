@@ -75,3 +75,6 @@ vgcore.*
 *.gcno
 *.gcov
 breadcrumb/
+
+# macOS app bundle
+Sniffly.app/
