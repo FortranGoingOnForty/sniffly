@@ -10,7 +10,7 @@ module tab_widget
                  gtk_label_new, gtk_box_set_spacing, gtk_widget_set_hexpand, &
                  gtk_widget_set_halign, GTK_ALIGN_END
   use tab_manager, only: tab_state, get_tab, num_tabs, active_tab_index, &
-                         MAX_TABS, switch_to_tab
+                         MAX_TABS, switch_to_tab, create_tab, close_tab
   use gtk_app, only: update_ui_for_active_tab
   implicit none
   private
@@ -147,9 +147,30 @@ contains
 
   ! Callback when plus button is clicked
   subroutine on_plus_clicked(button, user_data) bind(c)
+    use gtk_app, only: get_home_directory
     type(c_ptr), value :: button, user_data
-    print *, "Plus button clicked - new tab"
-    ! TODO: Call new_tab_cb when registered
+    integer :: new_tab_index
+    type(tab_state), pointer :: new_tab
+
+    print *, "Plus button clicked - creating new tab"
+
+    ! Create a new tab for the home directory
+    ! TODO: Add directory picker to let user choose path
+    new_tab_index = create_tab(get_home_directory())
+
+    if (new_tab_index < 0) then
+      print *, "ERROR: Failed to create new tab (max tabs reached?)"
+      return
+    end if
+
+    print *, "Created new tab ", new_tab_index
+
+    ! Rebuild tab bar to show the new tab
+    ! TODO: Implement proper clear_tab_bar to avoid duplicates
+    ! For now, just refresh which will add the new tab
+    call refresh_tab_bar()
+
+    print *, "Tab bar refreshed with new tab"
   end subroutine on_plus_clicked
 
   ! Callback when a tab button is clicked
