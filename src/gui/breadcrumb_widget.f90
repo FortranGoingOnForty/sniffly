@@ -105,9 +105,8 @@ contains
   ! This is the ONLY function that modifies cached_segment_*
   subroutine update_breadcrumb_cache(full_path)
     character(len=*), intent(in) :: full_path
-    character(len=512) :: home_dir, working_path
-    integer :: i, slash_pos, start_pos, home_len
-    logical :: uses_tilde
+    character(len=512) :: working_path
+    integer :: slash_pos, start_pos
 
     print *, "Updating breadcrumb cache for: ", trim(full_path)
 
@@ -118,26 +117,8 @@ contains
 
     if (len_trim(full_path) == 0) return
 
-    ! Get home directory for ~ abbreviation
-    call get_environment_variable("HOME", home_dir)
-    home_len = len_trim(home_dir)
-
-    ! Check if path starts with home directory
+    ! Use full path (no ~ abbreviation for better navigation)
     working_path = trim(full_path)
-    uses_tilde = .false.
-    if (home_len > 0) then
-      if (len_trim(full_path) >= home_len) then
-        if (full_path(1:home_len) == home_dir(1:home_len)) then
-          ! Replace home with ~
-          if (len_trim(full_path) == home_len) then
-            working_path = "~"
-          else if (full_path(home_len+1:home_len+1) == "/") then
-            working_path = "~" // trim(full_path(home_len+1:))
-          end if
-          uses_tilde = .true.
-        end if
-      end if
-    end if
 
     ! Handle root path
     if (trim(working_path) == "/") then
@@ -149,32 +130,16 @@ contains
       return
     end if
 
-    ! Handle home-only path
-    if (trim(working_path) == "~") then
-      cached_segment_count = 1
-      cached_segment_paths(1) = trim(full_path)  ! Store actual path for navigation
-      cached_segment_names(1) = "~"
-      print *, "  Segment 1: ", trim(full_path), " -> ~"
-      call queue_redraw()
-      return
-    end if
-
     ! Parse path into segments
     start_pos = 1
 
-    ! Skip leading / or ~
-    if (working_path(1:1) == "/" .or. working_path(1:1) == "~") then
+    ! Add root segment
+    if (working_path(1:1) == "/") then
       start_pos = 2
-      ! Add root segment
       cached_segment_count = 1
-      if (uses_tilde) then
-        cached_segment_paths(1) = trim(home_dir)
-        cached_segment_names(1) = "~"
-      else
-        cached_segment_paths(1) = "/"
-        cached_segment_names(1) = "/"
-      end if
-      print *, "  Segment 1: ", trim(cached_segment_paths(1)), " -> ", trim(cached_segment_names(1))
+      cached_segment_paths(1) = "/"
+      cached_segment_names(1) = "/"
+      print *, "  Segment 1: / -> /"
     end if
 
     ! Parse remaining segments
@@ -193,14 +158,7 @@ contains
       if (slash_pos == 0) then
         ! Last segment (no trailing slash)
         cached_segment_count = cached_segment_count + 1
-        ! Build full path for this segment
-        if (uses_tilde) then
-          cached_segment_paths(cached_segment_count) = trim(home_dir) // &
-                                                        trim(working_path(2:len_trim(working_path)))
-        else
-          cached_segment_paths(cached_segment_count) = trim(working_path)
-        end if
-        ! Extract just the name
+        cached_segment_paths(cached_segment_count) = trim(working_path)
         cached_segment_names(cached_segment_count) = trim(working_path(start_pos:))
         print *, "  Segment ", cached_segment_count, ": ", &
                  trim(cached_segment_paths(cached_segment_count)), " -> ", &
@@ -209,14 +167,7 @@ contains
       else
         ! Intermediate segment
         cached_segment_count = cached_segment_count + 1
-        ! Build full path up to this segment
-        if (uses_tilde) then
-          cached_segment_paths(cached_segment_count) = trim(home_dir) // &
-                                                        trim(working_path(2:start_pos+slash_pos-2))
-        else
-          cached_segment_paths(cached_segment_count) = trim(working_path(1:start_pos+slash_pos-2))
-        end if
-        ! Extract just the name
+        cached_segment_paths(cached_segment_count) = trim(working_path(1:start_pos+slash_pos-2))
         cached_segment_names(cached_segment_count) = trim(working_path(start_pos:start_pos+slash_pos-2))
         print *, "  Segment ", cached_segment_count, ": ", &
                  trim(cached_segment_paths(cached_segment_count)), " -> ", &
