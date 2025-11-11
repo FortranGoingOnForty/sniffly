@@ -8,7 +8,8 @@ module tab_widget
                  gtk_widget_set_size_request, g_signal_connect, &
                  gtk_widget_add_css_class, gtk_widget_remove_css_class, &
                  gtk_label_new, gtk_box_set_spacing, gtk_widget_set_hexpand, &
-                 gtk_widget_set_halign, GTK_ALIGN_END
+                 gtk_widget_set_halign, GTK_ALIGN_END, gtk_widget_get_first_child, &
+                 gtk_widget_get_next_sibling
   use tab_manager, only: tab_state, get_tab, num_tabs, active_tab_index, &
                          MAX_TABS, switch_to_tab, create_tab, close_tab
   implicit none
@@ -74,7 +75,7 @@ contains
 
   ! Refresh tab bar (rebuild all tab buttons)
   subroutine refresh_tab_bar()
-    type(c_ptr) :: plus_btn, tab_btn
+    type(c_ptr) :: plus_btn, tab_btn, child, next_child
     type(tab_state), pointer :: tab
     integer :: i
     character(len=256) :: label_text
@@ -86,8 +87,19 @@ contains
 
     print *, "Refreshing tab bar with ", num_tabs, " tabs"
 
-    ! TODO: Clear existing children (need gtk_widget_get_first_child and loop)
-    ! For now, we'll just append - proper clearing will be added later
+    ! Clear all existing children from tab bar
+    child = gtk_widget_get_first_child(tab_bar_container)
+    do while (c_associated(child))
+      ! Get next sibling BEFORE removing current child
+      next_child = gtk_widget_get_next_sibling(child)
+      call gtk_box_remove(tab_bar_container, child)
+      child = next_child
+    end do
+
+    ! Clear button pointer array
+    tab_buttons(:) = c_null_ptr
+
+    print *, "Cleared old tab bar widgets"
 
     ! Create plus button first (leftmost)
     plus_btn = gtk_button_new_with_label("+"//c_null_char)
