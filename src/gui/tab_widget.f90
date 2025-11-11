@@ -147,16 +147,26 @@ contains
 
   ! Callback when plus button is clicked
   subroutine on_plus_clicked(button, user_data) bind(c)
-    use gtk_app, only: get_home_directory
+    use iso_fortran_env, only: output_unit
     type(c_ptr), value :: button, user_data
     integer :: new_tab_index
-    type(tab_state), pointer :: new_tab
+    type(tab_state), pointer :: new_tab, current_tab
+    character(len=512) :: new_tab_path
 
     print *, "Plus button clicked - creating new tab"
 
-    ! Create a new tab for the home directory
+    ! Get the current tab's path and use that for the new tab
     ! TODO: Add directory picker to let user choose path
-    new_tab_index = create_tab(get_home_directory())
+    current_tab => get_tab(active_tab_index)
+    if (associated(current_tab)) then
+      new_tab_path = current_tab%scan_path
+    else
+      ! Fallback to home directory using environment variable
+      call get_environment_variable("HOME", new_tab_path)
+    end if
+
+    ! Create a new tab with the same path as current tab
+    new_tab_index = create_tab(trim(new_tab_path))
 
     if (new_tab_index < 0) then
       print *, "ERROR: Failed to create new tab (max tabs reached?)"
