@@ -32,9 +32,10 @@ module gtk_app
   use treemap_renderer, only: register_progress_callback, scan_directory, set_redraw_widget, &
                                register_scan_completion_callback, set_renderer_state_from_tab
   use tab_manager, only: tab_state, init_tab_manager, create_tab, get_active_tab, &
-                         switch_to_tab, num_tabs, active_tab_index, get_path_basename
-  use tab_widget, only: create_tab_bar, refresh_tab_bar, register_tab_switch_callback, &
-                        update_tab_visual_states
+                         switch_to_tab, close_tab, num_tabs, active_tab_index, get_path_basename
+  use cairo_tab_bar, only: create_cairo_tab_bar, refresh_cairo_tab_bar, &
+                           register_cairo_tab_switch_callback, register_cairo_tab_close_callback, &
+                           register_cairo_new_tab_callback
   implicit none
   private
 
@@ -398,17 +399,19 @@ contains
     ! Add breadcrumb widget to breadcrumb row
     call gtk_box_append(breadcrumb_row, breadcrumb_widget)
 
-    ! Create tab bar (on right side of breadcrumb row)
-    tab_bar = create_tab_bar()
+    ! Create Cairo-rendered tab bar (on right side of breadcrumb row)
+    tab_bar = create_cairo_tab_bar()
     if (c_associated(tab_bar)) then
       call gtk_box_append(breadcrumb_row, tab_bar)
-      ! Populate with tabs
-      call refresh_tab_bar()
-      ! Register callback for tab switching to update UI
-      call register_tab_switch_callback(update_ui_for_active_tab)
-      print *, "Tab bar added to breadcrumb row"
+      ! Register callbacks for tab interactions
+      call register_cairo_tab_switch_callback(on_cairo_tab_switch)
+      call register_cairo_tab_close_callback(on_cairo_tab_close)
+      call register_cairo_new_tab_callback(on_cairo_new_tab)
+      ! Trigger initial draw
+      call refresh_cairo_tab_bar()
+      print *, "Cairo tab bar added to breadcrumb row"
     else
-      print *, "ERROR: Failed to create tab bar"
+      print *, "ERROR: Failed to create Cairo tab bar"
     end if
 
     ! Add breadcrumb row to main box
@@ -424,6 +427,9 @@ contains
 
     ! Store pointer for later use (e.g., tab switching redraw)
     drawing_area_ptr = drawing_area
+
+    ! Add CSS class for card styling (border that matches active tab)
+    call gtk_widget_add_css_class(drawing_area, "canvas-card"//c_null_char)
 
     ! Make drawing area expand to fill space
     call gtk_widget_set_hexpand(drawing_area, 1_c_int)
@@ -502,6 +508,7 @@ contains
     character(len=:), allocatable :: css_data
 
     ! CSS with pulsing animation for suggested-action class (empty tabs)
+    ! and card border styling to match active tab appearance
     css_data = &
       "@keyframes pulse { " // &
       "0% { opacity: 1.0; } " // &
@@ -510,6 +517,11 @@ contains
       "} " // &
       ".suggested-action { " // &
       "animation: pulse 1.5s ease-in-out infinite; " // &
+      "} " // &
+      ".canvas-card { " // &
+      "background-color: rgba(250, 250, 250, 1.0); " // &
+      "border: 1px solid rgba(179, 179, 179, 1.0); " // &
+      "border-top: none; " // &
       "}"
 
     ! Create CSS provider
@@ -524,7 +536,7 @@ contains
     ! Add CSS provider to display (600 = GTK_STYLE_PROVIDER_PRIORITY_APPLICATION)
     call gtk_style_context_add_provider_for_display(display, css_provider, 600_c_int)
 
-    print *, "Custom CSS loaded (pulsing animation for empty tabs)"
+    print *, "Custom CSS loaded (pulsing animation + canvas card styling)"
   end subroutine load_custom_css
 
   ! Callback when Open Directory button is clicked
@@ -1365,6 +1377,81 @@ contains
     call sniffly_update_status("Toggled render mode (flat vs cushioned)")
   end subroutine on_toggle_render_mode_clicked
 
+  ! Cairo tab bar callback wrappers
+  subroutine on_cairo_tab_switch(tab_index)
+    integer, intent(in) :: tab_index
+
+    ! Skip if already on this tab
+    if (tab_index == active_tab_index) return
+
+    print *, "Cairo tab switch to tab ", tab_index
+
+    ! Switch to the clicked tab
+    call switch_to_tab(tab_index)
+
+    ! Trigger redraw of tab bar (highlights active tab)
+    call refresh_cairo_tab_bar()
+
+    ! Update UI for the new active tab
+    call update_ui_for_active_tab()
+
+    print *, "Switched to tab ", tab_index
+  end subroutine on_cairo_tab_switch
+
+  subroutine on_cairo_tab_close(tab_index)
+    integer, intent(in) :: tab_index
+
+    print *, "Cairo tab close for tab ", tab_index
+
+    ! Prevent closing last tab
+    if (num_tabs <= 1) then
+      print *, "ERROR: Cannot close last tab"
+      return
+    end if
+
+    ! Close the tab
+    call close_tab(tab_index)
+
+    ! Trigger redraw of tab bar
+    call refresh_cairo_tab_bar()
+
+    ! Update UI for the new active tab
+    call update_ui_for_active_tab()
+
+    print *, "Tab ", tab_index, " closed - now ", num_tabs, " tabs remaining"
+  end subroutine on_cairo_tab_close
+
+  subroutine on_cairo_new_tab()
+    integer :: new_tab_index
+    character(len=512) :: new_tab_path
+
+    print *, "Cairo new tab button clicked"
+
+    ! New tabs start completely empty - no path to avoid accidental scans
+    new_tab_path = ""
+
+    ! Create a new empty tab
+    new_tab_index = create_tab(new_tab_path)
+
+    if (new_tab_index < 0) then
+      print *, "ERROR: Failed to create new tab (max tabs reached?)"
+      return
+    end if
+
+    print *, "Created new tab ", new_tab_index
+
+    ! Switch to the new tab
+    call switch_to_tab(new_tab_index)
+
+    ! Trigger redraw of tab bar
+    call refresh_cairo_tab_bar()
+
+    ! Update UI for the new tab
+    call update_ui_for_active_tab()
+
+    print *, "Tab bar refreshed and switched to new tab ", new_tab_index
+  end subroutine on_cairo_new_tab
+
   ! Commented out unused helper function - was used by removed search/filter feature
   ! Uncomment if needed in future
 
@@ -1838,9 +1925,8 @@ contains
     ! Update button states now that history may have changed
     call update_history_buttons()
 
-    ! Refresh tab bar to show updated label
-    call refresh_tab_bar()
-    call update_tab_visual_states()
+    ! Refresh Cairo tab bar to show updated label
+    call refresh_cairo_tab_bar()
   end subroutine breadcrumb_callback
 
   ! Show progress bar (now just resets to prepare for updates)
