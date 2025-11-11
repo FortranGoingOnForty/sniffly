@@ -35,7 +35,8 @@ module gtk_app
   public :: sniffly_app_run, sniffly_app_quit, sniffly_set_scan_path, &
             sniffly_update_status, breadcrumb_callback, &
             sniffly_update_progress, sniffly_show_progress, sniffly_hide_progress, &
-            sniffly_update_status_bar_stats, get_forward_path
+            sniffly_update_status_bar_stats, get_forward_path, &
+            set_breadcrumb_navigation_flag
 
   ! Application constants
   character(len=*), parameter :: APP_ID = "org.fortrangoingonforty.sniffly"
@@ -1251,6 +1252,11 @@ contains
       print *, "Forward path available: ", trim(fwd_path)
     end if
   end function get_forward_path
+
+  ! Set flag for breadcrumb navigation (to preserve forward context)
+  subroutine set_breadcrumb_navigation_flag()
+    navigating_history = .true.
+  end subroutine set_breadcrumb_navigation_flag
 
   ! Callback wrapper for navigation events (no arguments)
   subroutine breadcrumb_callback()

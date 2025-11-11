@@ -362,11 +362,15 @@ contains
 
     ! Draw forward lookahead segments (greyed out)
     do i = 1, cached_forward_segment_count
-      ! Offset index for forward segments (after regular segments)
-      ! Use negative indices to distinguish from regular segments
+      ! Check if this forward segment is hovered
+      if (cached_segment_count + i == hovered_segment) then
+        ! Hovered forward segment: darker grey
+        call cairo_set_source_rgba(cr, 0.3_c_double, 0.3_c_double, 0.3_c_double, 0.7_c_double)
+      else
+        ! Normal forward segment: lighter grey with transparency
+        call cairo_set_source_rgba(cr, 0.5_c_double, 0.5_c_double, 0.5_c_double, 0.5_c_double)
+      end if
 
-      ! Set greyed out color with transparency
-      call cairo_set_source_rgba(cr, 0.5_c_double, 0.5_c_double, 0.5_c_double, 0.5_c_double)
       font_desc = pango_font_description_from_string("Sans 11"//c_null_char)
       call pango_layout_set_font_description(layout, font_desc)
       call pango_font_description_free(font_desc)
@@ -427,6 +431,7 @@ contains
   ! Click callback - handle navigation
   subroutine on_breadcrumb_click(gesture, n_press, x, y, user_data) bind(c)
     use treemap_renderer, only: get_current_view_node, scan_directory
+    use gtk_app, only: set_breadcrumb_navigation_flag
     use types, only: file_node
     type(c_ptr), value :: gesture, user_data
     integer(c_int), value :: n_press
@@ -464,6 +469,9 @@ contains
       end if
 
       print *, "Navigating to: ", target_path
+
+      ! Set flag to treat this as history navigation (preserves forward path)
+      call set_breadcrumb_navigation_flag()
 
       ! Scan the target directory
       ! This will update the current view and trigger callbacks
