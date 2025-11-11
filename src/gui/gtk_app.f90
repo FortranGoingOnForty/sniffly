@@ -20,7 +20,7 @@ module gtk_app
                  gtk_entry_set_placeholder_text, gtk_widget_add_css_class, &
                  gtk_widget_remove_css_class
   use gdk, only: gdk_display_get_default, gdk_display_get_clipboard, gdk_clipboard_set_text
-  use g, only: g_application_run, g_idle_add
+  use g, only: g_application_run, g_idle_add, g_timeout_add_seconds_once
   use treemap_widget, only: create_treemap_widget, set_scan_path, register_navigation_callback, &
                              register_key_handler, register_quit_callback, register_delete_callback, &
                              register_refresh_callback, register_selection_callback, mark_initial_scan_complete, &
@@ -31,7 +31,7 @@ module gtk_app
   private
 
   public :: sniffly_app_run, sniffly_app_quit, sniffly_set_scan_path, &
-            sniffly_update_status, sniffly_update_breadcrumbs, breadcrumb_callback, &
+            sniffly_update_status, sniffly_show_error, sniffly_update_breadcrumbs, breadcrumb_callback, &
             sniffly_update_progress, sniffly_show_progress, sniffly_hide_progress, &
             sniffly_update_status_bar_stats
 
@@ -483,7 +483,7 @@ contains
     type(c_ptr), value :: button, user_data
 
     if (len_trim(global_scan_path) == 0) then
-      call sniffly_update_status("No directory to scan")
+      call sniffly_show_error("No directory to scan")
       return
     end if
 
@@ -517,21 +517,27 @@ contains
     print *, "Open in Finder button clicked!"
 
     ! Check if there's a selection
-    if (.not. has_selection()) then
-      print *, "No selection - cannot open in Finder"
-      return
+    if (has_selection()) then
+      ! Get the selected node path
+      selected_path = get_selected_node_path()
+      if (len_trim(selected_path) == 0) then
+        print *, "Invalid selection path"
+        return
+      end if
+      print *, "Opening selected item in Finder: ", trim(selected_path)
+    else
+      ! No selection - use current directory
+      if (len_trim(global_scan_path) == 0) then
+         print *, "No current directory to open"
+        call sniffly_show_error("No directory to open in Finder")
+        return
+      end if
+      selected_path = trim(global_scan_path)
+      print *, "Opening current directory in Finder: ", trim(selected_path)
     end if
 
-    ! Get the selected node path
-    selected_path = get_selected_node_path()
-
-    if (len_trim(selected_path) == 0) then
-      print *, "Invalid selection path"
-      return
-    end if
-
-    print *, "Opening in Finder: ", trim(selected_path)
     call open_in_file_manager(selected_path)
+    call sniffly_update_status("Opened in Finder: " // trim(selected_path))
   end subroutine on_open_finder_clicked
 
   ! Callback when Copy Path button is clicked
@@ -545,7 +551,7 @@ contains
     ! Check if there's a selection
     if (.not. has_selection()) then
       print *, "No selection - cannot copy path"
-      call sniffly_update_status("No selection to copy")
+      call sniffly_show_error("No selection to copy")
       return
     end if
 
@@ -554,7 +560,7 @@ contains
 
     if (len_trim(selected_path) == 0) then
       print *, "Invalid selection path"
-      call sniffly_update_status("Invalid selection path")
+      call sniffly_show_error("Invalid selection path")
       return
     end if
 
@@ -564,7 +570,7 @@ contains
     display = gdk_display_get_default()
     if (.not. c_associated(display)) then
       print *, "ERROR: Failed to get default display"
-      call sniffly_update_status("Failed to access clipboard")
+      call sniffly_show_error("Failed to access clipboard")
       return
     end if
 
@@ -572,7 +578,7 @@ contains
     clipboard = gdk_display_get_clipboard(display)
     if (.not. c_associated(clipboard)) then
       print *, "ERROR: Failed to get clipboard"
-      call sniffly_update_status("Failed to access clipboard")
+      call sniffly_show_error("Failed to access clipboard")
       return
     end if
 
@@ -602,7 +608,7 @@ contains
 
     ! Check if there's a selection
     if (.not. has_selection()) then
-      call sniffly_update_status("No selection to show properties for")
+      call sniffly_show_error("No selection to show properties for")
       return
     end if
 
@@ -615,7 +621,7 @@ contains
     ! Get the selected child index (1-based: 1 = first child, 2 = second child, etc.)
     selected_idx = get_selected_index()
     if (selected_idx < 1 .or. selected_idx > view_node%num_children) then
-      call sniffly_update_status("Invalid selection")
+      call sniffly_show_error("Invalid selection")
       return
     end if
 
@@ -738,20 +744,21 @@ contains
 
     print *, "DEBUG: update_selection_buttons() called, has_selection =", has_sel
 
-    ! Enable/disable all selection-dependent buttons
+    ! Enable/disable selection-dependent buttons
     if (has_sel) then
       print *, "DEBUG:   Enabling selection-dependent buttons"
       call gtk_widget_set_sensitive(info_btn_ptr, 1_c_int)
       call gtk_widget_set_sensitive(copy_path_btn_ptr, 1_c_int)
-      call gtk_widget_set_sensitive(open_finder_btn_ptr, 1_c_int)
       call gtk_widget_set_sensitive(delete_btn_ptr, 1_c_int)
     else
       print *, "DEBUG:   Disabling selection-dependent buttons"
       call gtk_widget_set_sensitive(info_btn_ptr, 0_c_int)
       call gtk_widget_set_sensitive(copy_path_btn_ptr, 0_c_int)
-      call gtk_widget_set_sensitive(open_finder_btn_ptr, 0_c_int)
       call gtk_widget_set_sensitive(delete_btn_ptr, 0_c_int)
     end if
+
+    ! Open in Finder button is always enabled (defaults to current directory)
+    call gtk_widget_set_sensitive(open_finder_btn_ptr, 1_c_int)
   end subroutine update_selection_buttons
 
   ! Helper: Add path to navigation history
@@ -917,7 +924,7 @@ contains
       print *, "  Searched for: '", trim(pending_synthetic_child_name), "'"
       pending_synthetic_nav = .false.
       synthetic_nav_attempts = 0
-      call sniffly_update_status("Could not find grouped files node")
+      call sniffly_show_error("Could not find grouped files node")
     else
       print *, "  Child not found yet, will retry on next callback"
     end if
@@ -933,7 +940,7 @@ contains
 
     ! Block navigation if scan is active
     if (is_scan_active()) then
-      call sniffly_update_status("Cannot navigate: Scan in progress")
+      call sniffly_show_error("Cannot navigate: Scan in progress")
       return
     end if
 
@@ -961,7 +968,7 @@ contains
 
     ! Block navigation if scan is active
     if (is_scan_active()) then
-      call sniffly_update_status("Cannot navigate: Scan in progress")
+      call sniffly_show_error("Cannot navigate: Scan in progress")
       return
     end if
 
@@ -1303,6 +1310,33 @@ contains
       call gtk_label_set_text(status_label_ptr, trim(message)//c_null_char)
     end if
   end subroutine sniffly_update_status
+
+  ! Timeout callback to clear status message (called after 5 seconds)
+  function clear_status_message(user_data) bind(c) result(continue)
+    type(c_ptr), value :: user_data
+    integer(c_int) :: continue
+
+    ! Clear the status message
+    if (.not. app_is_shutting_down .and. c_associated(status_label_ptr)) then
+      call gtk_label_set_text(status_label_ptr, ""//c_null_char)
+    end if
+
+    ! Return 0 to indicate the timeout should not repeat (one-shot)
+    continue = 0_c_int
+  end function clear_status_message
+
+  ! Show error message in status bar, auto-dismiss after 5 seconds
+  subroutine sniffly_show_error(message)
+    character(len=*), intent(in) :: message
+    integer(c_int) :: timeout_id
+
+    ! Display the error message
+    call sniffly_update_status(message)
+
+    ! Schedule message to be cleared after 5 seconds
+    ! Note: g_timeout_add_seconds_once is a one-shot timer that calls the callback once
+    timeout_id = g_timeout_add_seconds_once(5_c_int, c_funloc(clear_status_message), c_null_ptr)
+  end subroutine sniffly_show_error
 
   ! Update status bar with file count and size statistics
   subroutine sniffly_update_status_bar_stats()
@@ -1658,7 +1692,7 @@ contains
     if (len_trim(global_scan_path) > 0) then
       call trigger_rescan(global_scan_path)
     else
-      call sniffly_update_status("No directory to scan")
+      call sniffly_show_error("No directory to scan")
     end if
   end subroutine refresh_callback_wrapper
 
