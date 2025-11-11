@@ -81,6 +81,9 @@ module gtk_app
   type(c_ptr), save :: open_finder_btn_ptr = c_null_ptr
   type(c_ptr), save :: delete_btn_ptr = c_null_ptr
 
+  ! Open directory button pointer (for pulsing on empty tabs)
+  type(c_ptr), save :: open_dir_btn_ptr = c_null_ptr
+
   ! Drawing area pointer (for redrawing treemap)
   type(c_ptr), save :: drawing_area_ptr = c_null_ptr
 
@@ -139,6 +142,7 @@ contains
     back_btn_ptr = c_null_ptr
     forward_btn_ptr = c_null_ptr
     cancel_scan_btn_ptr = c_null_ptr
+    open_dir_btn_ptr = c_null_ptr
   end subroutine sniffly_app_quit
 
   ! Set the directory path to scan (call before sniffly_app_run)
@@ -170,6 +174,7 @@ contains
     path_entry_ptr = c_null_ptr
     back_btn_ptr = c_null_ptr
     forward_btn_ptr = c_null_ptr
+    open_dir_btn_ptr = c_null_ptr
     main_window_ptr = c_null_ptr
 
     ! Return FALSE (0) to allow the window to close
@@ -233,6 +238,7 @@ contains
 
     ! Create Open Directory button with folder icon
     open_dir_btn = gtk_button_new()
+    open_dir_btn_ptr = open_dir_btn  ! Store for later access (pulsing on empty tabs)
     call gtk_button_set_icon_name(open_dir_btn, "folder-open"//c_null_char)
     call gtk_widget_set_tooltip_text(open_dir_btn, "Open Directory (Ctrl+O)"//c_null_char)
     call g_signal_connect(open_dir_btn, "clicked"//c_null_char, &
@@ -896,10 +902,24 @@ contains
     print *, "  Active tab index: ", active_tab_index
     print *, "  Tab has_data: ", tab%has_data
 
-    ! Only update if tab has data
+    ! Check if tab has data
     if (.not. tab%has_data) then
-      print *, "  Tab has no data yet - skipping UI update"
+      print *, "  Tab has no data yet - showing empty tab UI"
+
+      ! Add blue suggested-action class to open-dir button to draw attention
+      if (c_associated(open_dir_btn_ptr)) then
+        call gtk_widget_add_css_class(open_dir_btn_ptr, "suggested-action"//c_null_char)
+      end if
+
+      ! Update status bar to guide user
+      call sniffly_update_status("No directory selected - click the folder icon to choose a directory")
+
       return
+    end if
+
+    ! Tab has data - remove suggested-action class from open-dir button
+    if (c_associated(open_dir_btn_ptr)) then
+      call gtk_widget_remove_css_class(open_dir_btn_ptr, "suggested-action"//c_null_char)
     end if
 
     ! Get the current view node
