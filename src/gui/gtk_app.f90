@@ -559,6 +559,11 @@ contains
     ! Call helper to show native file picker
     call show_native_directory_picker(selected_path, status)
 
+    ! Restore window focus after dialog (native dialogs steal focus on macOS)
+    if (c_associated(main_window_ptr)) then
+      call gtk_window_present(main_window_ptr)
+    end if
+
     if (status == 0 .and. len_trim(selected_path) > 0) then
       print *, "Selected directory: ", trim(selected_path)
 
