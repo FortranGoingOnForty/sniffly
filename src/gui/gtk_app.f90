@@ -26,7 +26,8 @@ module gtk_app
                              register_refresh_callback, register_selection_callback, mark_initial_scan_complete, &
                              has_selection, get_selected_node_path
   use breadcrumb_widget, only: create_breadcrumb_widget, update_breadcrumb_cache, &
-                                set_navigation_callback
+                                set_navigation_callback, get_previous_breadcrumb_path, &
+                                clear_previous_breadcrumb_path
   use treemap_renderer, only: register_progress_callback, scan_directory, set_redraw_widget, &
                                register_scan_completion_callback
   implicit none
@@ -1257,18 +1258,79 @@ contains
     use treemap_renderer, only: get_current_view_node
     use types, only: file_node
     type(file_node), pointer :: current_view
-    character(len=512) :: fwd_path
+    character(len=512) :: fwd_path, prev_breadcrumb_path
+    integer :: i, matched_pos, current_len
+    logical :: was_navigating_history
 
     print *, "=== BREADCRUMB_CALLBACK ==="
+    print *, "  navigating_history flag at entry: ", navigating_history
+
+    ! Initialize variables
+    fwd_path = ""
+
+    ! Save flag state
+    was_navigating_history = navigating_history
 
     ! Sync global_scan_path with the current view node's path
     current_view => get_current_view_node()
     if (associated(current_view) .and. allocated(current_view%path)) then
       global_scan_path = trim(current_view%path)
       print *, "  Synced global_scan_path to: ", trim(global_scan_path)
+      print *, "  Current nav_history_pos: ", nav_history_pos, " nav_history_count: ", nav_history_count
 
-      ! Get forward path (if available)
-      fwd_path = get_forward_path()
+      ! Check for breadcrumb-based lookahead first (when clicking up in breadcrumb)
+      prev_breadcrumb_path = get_previous_breadcrumb_path()
+      if (len_trim(prev_breadcrumb_path) > 0) then
+        print *, "  Previous breadcrumb path: ", trim(prev_breadcrumb_path)
+        ! Check if current path is a prefix of previous path (navigating up)
+        current_len = len_trim(global_scan_path)
+        if (len_trim(prev_breadcrumb_path) > current_len) then
+          if (prev_breadcrumb_path(1:current_len) == global_scan_path(1:current_len)) then
+            ! We navigated to a parent directory via breadcrumb
+            fwd_path = trim(prev_breadcrumb_path)
+            print *, "  Breadcrumb-based lookahead detected: ", trim(fwd_path)
+            ! Clear the saved path
+            call clear_previous_breadcrumb_path()
+          end if
+        else
+          ! Not a parent navigation, clear the saved path
+          call clear_previous_breadcrumb_path()
+        end if
+      end if
+
+      ! Check if this path matches any entry in history (for breadcrumb clicks)
+      ! This syncs nav_history_pos with breadcrumb navigation
+      ! Only do this if we're NOT already in a history navigation (back/forward button)
+      if (.not. was_navigating_history .and. nav_history_count > 0) then
+        matched_pos = 0
+        do i = 1, nav_history_count
+          if (trim(nav_history(i)) == trim(global_scan_path)) then
+            matched_pos = i
+            print *, "  Found path in history at position ", i
+            exit
+          end if
+        end do
+
+        if (matched_pos > 0 .and. matched_pos /= nav_history_pos) then
+          print *, "  Breadcrumb navigation: syncing history pos from ", nav_history_pos, " to ", matched_pos
+          nav_history_pos = matched_pos
+          navigating_history = .true.  ! Mark as history navigation to skip add_to_history
+        else if (matched_pos > 0) then
+          print *, "  Path matches current history position - no sync needed"
+        else
+          print *, "  Path not found in history - will add as new entry"
+        end if
+      end if
+
+      ! Get history-based forward path (if available and no breadcrumb lookahead)
+      if (len_trim(fwd_path) == 0) then
+        fwd_path = get_forward_path()
+        if (len_trim(fwd_path) > 0) then
+          print *, "  History-based forward path available: ", trim(fwd_path)
+        else
+          print *, "  No forward path available"
+        end if
+      end if
 
       ! Update breadcrumb widget with new path and forward lookahead
       if (len_trim(fwd_path) > 0) then
@@ -1290,12 +1352,15 @@ contains
       end if
     else
       if (navigating_history) then
-        print *, "  Skipping add_to_history (back/forward button navigation)"
-        navigating_history = .false.  ! Reset flag
+        print *, "  Skipping add_to_history (history navigation mode)"
       else
-        print *, "  Skipping add_to_history (breadcrumb navigation with forward context)"
+        print *, "  Skipping add_to_history (forward context exists)"
       end if
     end if
+
+    ! ALWAYS reset the flag at the end (ensure it doesn't stick)
+    print *, "  Resetting navigating_history flag to false"
+    navigating_history = .false.
 
     ! Update button states now that history may have changed
     call update_history_buttons()
