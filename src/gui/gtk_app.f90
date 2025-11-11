@@ -1174,13 +1174,21 @@ contains
   subroutine on_toggle_dotfiles_clicked(button, user_data) bind(c)
     use treemap_renderer, only: toggle_hidden_files
     type(c_ptr), value :: button, user_data
+    type(tab_state), pointer :: tab
+
+    ! Get active tab
+    tab => get_active_tab()
+    if (.not. associated(tab)) then
+      print *, "ERROR: No active tab in on_toggle_dotfiles_clicked"
+      return
+    end if
 
     call toggle_hidden_files()
     call sniffly_update_status("Toggled hidden files visibility - rescanning...")
 
     ! Trigger rescan to apply the filter
-    if (len_trim(global_scan_path) > 0) then
-      call trigger_rescan(global_scan_path)
+    if (len_trim(tab%scan_path) > 0) then
+      call trigger_rescan(tab%scan_path)
     end if
   end subroutine on_toggle_dotfiles_clicked
 
@@ -1773,8 +1781,16 @@ contains
   ! Callback wrapper for force refresh events (clear cache and rescan)
   subroutine refresh_callback_wrapper()
     use treemap_renderer, only: clear_cache, invalidate_layout
+    type(tab_state), pointer :: tab
 
     print *, "Force refresh triggered from keyboard shortcut"
+
+    ! Get active tab
+    tab => get_active_tab()
+    if (.not. associated(tab)) then
+      print *, "ERROR: No active tab in refresh_callback_wrapper"
+      return
+    end if
 
     ! Clear the directory cache
     call clear_cache()
@@ -1784,8 +1800,8 @@ contains
     call sniffly_update_status("Clearing cache and rescanning...")
 
     ! Trigger rescan if we have a path
-    if (len_trim(global_scan_path) > 0) then
-      call trigger_rescan(global_scan_path)
+    if (len_trim(tab%scan_path) > 0) then
+      call trigger_rescan(tab%scan_path)
     else
       call sniffly_show_error("No directory to scan")
     end if
