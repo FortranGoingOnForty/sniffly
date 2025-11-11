@@ -235,7 +235,8 @@ contains
     type(c_ptr), value :: area, cr, user_data
     integer(c_int), value :: width, height
     type(c_ptr) :: layout, font_desc
-    integer(c_int) :: text_width, text_height, x_offset
+    integer(c_int), target :: text_width, text_height
+    integer(c_int) :: x_offset
     integer :: i
     character(len=:), allocatable :: separator
 
@@ -286,7 +287,7 @@ contains
                                   int(len_trim(cached_segment_names(i)), c_int))
 
       ! Get text size
-      call pango_layout_get_pixel_size(layout, text_width, text_height)
+      call pango_layout_get_pixel_size(layout, c_loc(text_width), c_loc(text_height))
 
       ! Store bounds for hit-testing
       segment_rects(i)%x = x_offset
@@ -312,7 +313,7 @@ contains
 
         call pango_layout_set_text(layout, trim(separator)//c_null_char, &
                                     int(len_trim(separator), c_int))
-        call pango_layout_get_pixel_size(layout, text_width, text_height)
+        call pango_layout_get_pixel_size(layout, c_loc(text_width), c_loc(text_height))
         call cairo_move_to(cr, real(x_offset, c_double), &
                            real((height - text_height) / 2, c_double))
         call pango_cairo_show_layout(cr, layout)
