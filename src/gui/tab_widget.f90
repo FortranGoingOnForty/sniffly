@@ -11,11 +11,11 @@ module tab_widget
                  gtk_widget_set_halign, GTK_ALIGN_END
   use tab_manager, only: tab_state, get_tab, num_tabs, active_tab_index, &
                          MAX_TABS, switch_to_tab, create_tab, close_tab
-  use gtk_app, only: update_ui_for_active_tab
   implicit none
   private
 
-  public :: create_tab_bar, refresh_tab_bar, get_tab_bar_widget, update_tab_visual_states
+  public :: create_tab_bar, refresh_tab_bar, get_tab_bar_widget, update_tab_visual_states, &
+            register_tab_switch_callback
 
   ! Tab bar container
   type(c_ptr), save :: tab_bar_container = c_null_ptr
@@ -43,10 +43,17 @@ module tab_widget
     end subroutine new_tab_callback
   end interface
 
+  ! Tab switch callback interface (for UI updates)
+  abstract interface
+    subroutine tab_switch_callback()
+    end subroutine tab_switch_callback
+  end interface
+
   ! Registered callbacks
   procedure(tab_click_callback), pointer, save :: tab_click_cb => null()
   procedure(close_tab_callback), pointer, save :: close_tab_cb => null()
   procedure(new_tab_callback), pointer, save :: new_tab_cb => null()
+  procedure(tab_switch_callback), pointer, save :: tab_switch_cb => null()
 
 contains
 
@@ -216,8 +223,10 @@ contains
     ! Update tab visual states (yellow border)
     call update_tab_visual_states()
 
-    ! Update UI to reflect the new tab's state
-    call update_ui_for_active_tab()
+    ! Call registered UI update callback (if registered)
+    if (associated(tab_switch_cb)) then
+      call tab_switch_cb()
+    end if
 
     print *, "Switched to tab ", clicked_tab_index
   end subroutine on_tab_clicked
@@ -239,5 +248,12 @@ contains
     procedure(new_tab_callback) :: callback
     new_tab_cb => callback
   end subroutine register_new_tab_callback
+
+  ! Register tab switch callback (for UI updates)
+  subroutine register_tab_switch_callback(callback)
+    procedure(tab_switch_callback) :: callback
+    tab_switch_cb => callback
+    print *, "Tab switch callback registered"
+  end subroutine register_tab_switch_callback
 
 end module tab_widget

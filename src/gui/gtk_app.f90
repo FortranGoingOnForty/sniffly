@@ -32,7 +32,7 @@ module gtk_app
                                register_scan_completion_callback
   use tab_manager, only: tab_state, init_tab_manager, create_tab, get_active_tab, &
                          switch_to_tab, num_tabs, active_tab_index
-  use tab_widget, only: create_tab_bar, refresh_tab_bar
+  use tab_widget, only: create_tab_bar, refresh_tab_bar, register_tab_switch_callback
   implicit none
   private
 
@@ -80,6 +80,9 @@ module gtk_app
   type(c_ptr), save :: copy_path_btn_ptr = c_null_ptr
   type(c_ptr), save :: open_finder_btn_ptr = c_null_ptr
   type(c_ptr), save :: delete_btn_ptr = c_null_ptr
+
+  ! Drawing area pointer (for redrawing treemap)
+  type(c_ptr), save :: drawing_area_ptr = c_null_ptr
 
   ! Pending navigation state for synthetic paths
   logical, save :: pending_synthetic_nav = .false.
@@ -393,6 +396,8 @@ contains
       call gtk_box_append(breadcrumb_row, tab_bar)
       ! Populate with tabs
       call refresh_tab_bar()
+      ! Register callback for tab switching to update UI
+      call register_tab_switch_callback(update_ui_for_active_tab)
       print *, "Tab bar added to breadcrumb row"
     else
       print *, "ERROR: Failed to create tab bar"
@@ -408,6 +413,9 @@ contains
       print *, "ERROR: Failed to create treemap widget"
       return
     end if
+
+    ! Store pointer for later use (e.g., tab switching redraw)
+    drawing_area_ptr = drawing_area
 
     ! Make drawing area expand to fill space
     call gtk_widget_set_hexpand(drawing_area, 1_c_int)
