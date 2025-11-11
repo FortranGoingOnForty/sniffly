@@ -11,6 +11,7 @@ module tab_widget
                  gtk_widget_set_halign, GTK_ALIGN_END
   use tab_manager, only: tab_state, get_tab, num_tabs, active_tab_index, &
                          MAX_TABS, switch_to_tab
+  use gtk_app, only: update_ui_for_active_tab
   implicit none
   private
 
@@ -183,6 +184,9 @@ contains
 
     ! Update tab visual states (yellow border)
     call update_tab_visual_states()
+
+    ! Update UI to reflect the new tab's state
+    call update_ui_for_active_tab()
 
     print *, "Switched to tab ", clicked_tab_index
   end subroutine on_tab_clicked

@@ -39,7 +39,7 @@ module gtk_app
   public :: sniffly_app_run, sniffly_app_quit, sniffly_set_scan_path, &
             sniffly_update_status, sniffly_show_error, breadcrumb_callback, &
             sniffly_update_progress, sniffly_show_progress, sniffly_hide_progress, &
-            sniffly_update_status_bar_stats, get_forward_path
+            sniffly_update_status_bar_stats, get_forward_path, update_ui_for_active_tab
 
   ! Application constants
   character(len=*), parameter :: APP_ID = "org.fortrangoingonforty.sniffly"
@@ -221,6 +221,10 @@ contains
       return
     end if
     print *, "Created initial tab ", first_tab_index, " for: ", trim(scan_path)
+
+    ! TEMPORARY: Create a second tab for testing tab switching
+    first_tab_index = create_tab(get_home_directory())
+    print *, "Created second tab for testing: ", trim(get_home_directory())
 
     ! Create main vertical box (toolbar + treemap)
     main_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0_c_int)
@@ -868,6 +872,58 @@ contains
     ! Open in Finder button is always enabled (defaults to current directory)
     call gtk_widget_set_sensitive(open_finder_btn_ptr, 1_c_int)
   end subroutine update_selection_buttons
+
+  ! Update UI to reflect the active tab's state (called when switching tabs)
+  subroutine update_ui_for_active_tab()
+    use gtk, only: gtk_widget_queue_draw
+    use types, only: file_node
+    type(tab_state), pointer :: tab
+    type(file_node), pointer :: current_view
+
+    print *, "=== UPDATE_UI_FOR_ACTIVE_TAB ==="
+
+    ! Get active tab
+    tab => get_active_tab()
+    if (.not. associated(tab)) then
+      print *, "ERROR: No active tab"
+      return
+    end if
+
+    print *, "  Active tab index: ", active_tab_index
+    print *, "  Tab has_data: ", tab%has_data
+
+    ! Only update if tab has data
+    if (.not. tab%has_data) then
+      print *, "  Tab has no data yet - skipping UI update"
+      return
+    end if
+
+    ! Get the current view node
+    current_view => tab%current_view_node
+    if (.not. associated(current_view)) then
+      print *, "ERROR: Tab has_data=true but current_view_node not associated"
+      return
+    end if
+
+    print *, "  Updating breadcrumb for: ", trim(current_view%path)
+
+    ! Update breadcrumb cache
+    call update_breadcrumb_cache(trim(current_view%path))
+
+    ! Trigger treemap redraw
+    if (c_associated(drawing_area_ptr)) then
+      call gtk_widget_queue_draw(drawing_area_ptr)
+      print *, "  Triggered treemap redraw"
+    end if
+
+    ! Update navigation buttons
+    call update_history_buttons()
+
+    ! Update path entry
+    call update_path_entry(trim(current_view%path))
+
+    print *, "=== UI UPDATE COMPLETE ==="
+  end subroutine update_ui_for_active_tab
 
   ! Helper: Add path to navigation history
   subroutine add_to_history(path)
