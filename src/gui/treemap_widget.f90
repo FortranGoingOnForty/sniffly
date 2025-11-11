@@ -429,16 +429,16 @@ contains
       return
     end if
 
+    ! Skip rendering if no scan path set (empty tab - show blank canvas)
+    if (len_trim(scan_path) == 0) then
+      print *, "Skipping render - no scan path set (empty tab)"
+      return
+    end if
+
     ! Render the actual treemap with hover and selection
     ! mouse_x and mouse_y are updated by both mouse motion and arrow keys
-    if (len_trim(scan_path) > 0) then
-      call scan_and_render_with_interaction(cr, width, height, mouse_x, mouse_y, &
-                                             selected_index, trim(scan_path))
-    else
-      ! Fallback to default if no path set
-      call scan_and_render_with_interaction(cr, width, height, mouse_x, mouse_y, &
-                                             selected_index)
-    end if
+    call scan_and_render_with_interaction(cr, width, height, mouse_x, mouse_y, &
+                                           selected_index, trim(scan_path))
 
     ! Update breadcrumbs after first render (when scan is complete)
     if (first_render) then

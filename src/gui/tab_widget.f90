@@ -118,8 +118,12 @@ contains
       ! Create horizontal container for this tab (label + close button)
       tab_container = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 2_c_int)
 
-      ! Format label as ".../basename"
-      label_text = ".../" // trim(tab%label)
+      ! Format label - show just "Empty" for empty tabs, ".../basename" for normal tabs
+      if (trim(tab%label) == "Empty") then
+        label_text = "Empty"
+      else
+        label_text = ".../" // trim(tab%label)
+      end if
 
       ! Create tab label button
       tab_btn = gtk_button_new_with_label(trim(label_text)//c_null_char)
