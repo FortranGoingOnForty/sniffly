@@ -189,6 +189,11 @@ contains
       call gtk_widget_queue_draw(widget_for_redraw)
     end if
 
+    ! Call scan completion callback to update button states now that scan is inactive
+    if (associated(scan_completion_cb)) then
+      call scan_completion_cb()
+    end if
+
     print *, "Scan complete. Final root size: ", root_node%size, " bytes"
   end subroutine on_progressive_scan_complete
 
