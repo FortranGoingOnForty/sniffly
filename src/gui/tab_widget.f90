@@ -195,18 +195,11 @@ contains
 
     print *, "Plus button clicked - creating new tab"
 
-    ! Get the current tab's path and use that for the new tab
-    ! TODO: Add directory picker to let user choose path
-    current_tab => get_tab(active_tab_index)
-    if (associated(current_tab)) then
-      new_tab_path = current_tab%scan_path
-    else
-      ! Fallback to home directory using environment variable
-      call get_environment_variable("HOME", new_tab_path)
-    end if
+    ! New tabs start completely empty - no path to avoid accidental scans
+    new_tab_path = ""
 
-    ! Create a new tab with the same path as current tab
-    new_tab_index = create_tab(trim(new_tab_path))
+    ! Create a new empty tab
+    new_tab_index = create_tab(new_tab_path)
 
     if (new_tab_index < 0) then
       print *, "ERROR: Failed to create new tab (max tabs reached?)"

@@ -256,6 +256,12 @@ contains
     character(len=256) :: basename
     integer :: last_slash
 
+    ! Special case: empty path (new empty tabs)
+    if (len_trim(path) == 0) then
+      basename = "Empty"
+      return
+    end if
+
     ! Find last slash
     last_slash = index(trim(path), "/", back=.true.)
 
