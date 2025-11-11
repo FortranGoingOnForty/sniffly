@@ -2,7 +2,7 @@
 # Build configuration using Meson
 
 project('sniffly', ['fortran', 'c', 'objc'],
-  version: '0.2.4',  # Also maintained in VERSION file
+  version: '0.4.0',  # Also maintained in VERSION file
   license: 'MIT',
   default_options: [
     'warning_level=3',
