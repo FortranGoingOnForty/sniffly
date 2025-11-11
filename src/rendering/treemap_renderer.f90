@@ -1627,6 +1627,7 @@ contains
 
   ! Toggle file extensions in labels
   subroutine toggle_file_extensions()
+    use gtk, only: gtk_widget_queue_draw
     show_file_extensions = .not. show_file_extensions
     if (show_file_extensions) then
       print *, "File extensions enabled"
@@ -1635,6 +1636,13 @@ contains
     end if
     ! Invalidate layout to force redraw
     call invalidate_layout()
+    ! Trigger widget redraw to show the change
+    if (c_associated(widget_for_redraw)) then
+      call gtk_widget_queue_draw(widget_for_redraw)
+      print *, "Redraw queued for file extension toggle"
+    else
+      print *, "ERROR: widget_for_redraw not associated!"
+    end if
   end subroutine toggle_file_extensions
 
   ! Toggle age-based coloring
