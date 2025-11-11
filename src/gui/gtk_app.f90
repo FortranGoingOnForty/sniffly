@@ -310,10 +310,10 @@ contains
     call gtk_box_append(toolbar, copy_path_btn)
     copy_path_btn_ptr = copy_path_btn  ! Store for enabling/disabling
 
-    ! Create Properties/Info button
+    ! Create Properties/Info button (opens macOS Get Info window)
     info_btn = gtk_button_new()
-    call gtk_button_set_icon_name(info_btn, "document-properties"//c_null_char)
-    call gtk_widget_set_tooltip_text(info_btn, "Show Properties/Info"//c_null_char)
+    call gtk_button_set_icon_name(info_btn, "dialog-information"//c_null_char)
+    call gtk_widget_set_tooltip_text(info_btn, "Show in Finder Info"//c_null_char)
     call g_signal_connect(info_btn, "clicked"//c_null_char, &
                            c_funloc(on_info_clicked), c_null_ptr)
     call gtk_box_append(toolbar, info_btn)
@@ -590,15 +590,13 @@ contains
     print *, "Path copied successfully!"
   end subroutine on_copy_path_clicked
 
-  ! Callback when Properties/Info button is clicked
-  subroutine on_info_clicked(button, user_data) bind(c)
+  ! Helper: Build selection info string for status bar
+  function build_selection_info() result(info_text)
     use iso_fortran_env, only: int64
     use treemap_renderer, only: get_current_view_node
     use treemap_widget, only: get_selected_index
     use types, only: file_node
     use file_system, only: list_directory
-    type(c_ptr), value :: button, user_data
-    character(len=:), allocatable :: info_msg
     character(len=1024) :: info_text
     character(len=20) :: size_str
     type(file_node), pointer :: view_node
@@ -606,11 +604,7 @@ contains
     integer :: item_count, selected_idx
     character(len=256), dimension(10000) :: entries
 
-    ! Check if there's a selection
-    if (.not. has_selection()) then
-      call sniffly_show_error("No selection to show properties for")
-      return
-    end if
+    info_text = ""
 
     ! Get the selected node
     view_node => get_current_view_node()
@@ -618,23 +612,21 @@ contains
       return
     end if
 
-    ! Get the selected child index (1-based: 1 = first child, 2 = second child, etc.)
+    ! Get the selected child index (1-based)
     selected_idx = get_selected_index()
     if (selected_idx < 1 .or. selected_idx > view_node%num_children) then
-      call sniffly_show_error("Invalid selection")
       return
     end if
 
-    ! Get details from selected child (selected_idx is already 1-based)
+    ! Get details from selected child
     size_bytes = view_node%children(selected_idx)%size
 
     ! Check if this is a grouped "[N small files]" node
     if (index(view_node%children(selected_idx)%name, '[') == 1 .and. &
         index(view_node%children(selected_idx)%name, 'small files]') > 0) then
-      ! This is a grouped small files node - don't count items (name already has the count)
       item_count = -1  ! Special marker for grouped nodes
     else if (view_node%children(selected_idx)%is_directory) then
-      ! For regular directories, count entries on-demand to get accurate item count
+      ! For regular directories, count entries on-demand
       item_count = list_directory(view_node%children(selected_idx)%path, entries, 10000)
     else
       item_count = 0  ! Files don't have children
@@ -651,7 +643,7 @@ contains
       write(size_str, '(F0.2,A)') real(size_bytes)/(1024.0**3), ' GB'
     end if
 
-    ! Build info text for status bar
+    ! Build info text
     if (item_count == -1) then
       ! Grouped small files - name already contains the count
       write(info_text, '(A,A,A)') &
@@ -665,10 +657,48 @@ contains
       write(info_text, '(A,A,A,A)') &
         trim(view_node%children(selected_idx)%name), ' | ', trim(size_str), ' | File'
     end if
+  end function build_selection_info
 
-    ! Show properties in status bar
-    info_msg = trim(info_text)
-    call sniffly_update_status(info_msg)
+  ! Callback when Properties/Info button is clicked - opens macOS Get Info window
+  subroutine on_info_clicked(button, user_data) bind(c)
+    type(c_ptr), value :: button, user_data
+    character(len=512) :: selected_path
+    character(len=1024) :: applescript_cmd
+    integer :: exit_status
+
+    print *, "Info button clicked - opening macOS Get Info window"
+
+    ! Check if there's a selection
+    if (.not. has_selection()) then
+      call sniffly_show_error("No selection to show info for")
+      return
+    end if
+
+    ! Get the selected node path
+    selected_path = get_selected_node_path()
+    if (len_trim(selected_path) == 0) then
+      print *, "Invalid selection path"
+      call sniffly_show_error("Invalid selection")
+      return
+    end if
+
+    print *, "Opening Get Info for: ", trim(selected_path)
+
+    ! Build AppleScript command to open Get Info window
+    ! We escape single quotes in the path by replacing ' with '\''
+    write(applescript_cmd, '(A,A,A)') &
+      'osascript -e ''tell application "Finder" to open information window of (POSIX file "', &
+      trim(selected_path), '" as alias)'''
+
+    ! Execute the command
+    call execute_command_line(trim(applescript_cmd), exitstat=exit_status)
+
+    if (exit_status /= 0) then
+      print *, "ERROR: Failed to open Get Info window (exit status:", exit_status, ")"
+      call sniffly_show_error("Failed to open Get Info window")
+    else
+      print *, "Successfully opened Get Info window"
+    end if
   end subroutine on_info_clicked
 
   ! Helper: Update Back/Forward button states
@@ -730,10 +760,11 @@ contains
     end if
   end subroutine update_cancel_scan_button_state
 
-  ! Helper: Update selection-dependent button states
+  ! Helper: Update selection-dependent button states and display selection info
   subroutine update_selection_buttons()
     use gtk, only: gtk_widget_set_sensitive
     logical :: has_sel
+    character(len=1024) :: sel_info
 
     ! Guard against accessing widgets during shutdown
     if (app_is_shutting_down) return
@@ -750,11 +781,20 @@ contains
       call gtk_widget_set_sensitive(info_btn_ptr, 1_c_int)
       call gtk_widget_set_sensitive(copy_path_btn_ptr, 1_c_int)
       call gtk_widget_set_sensitive(delete_btn_ptr, 1_c_int)
+
+      ! Auto-display selection info in status bar
+      sel_info = build_selection_info()
+      if (len_trim(sel_info) > 0) then
+        call sniffly_update_status(trim(sel_info))
+      end if
     else
       print *, "DEBUG:   Disabling selection-dependent buttons"
       call gtk_widget_set_sensitive(info_btn_ptr, 0_c_int)
       call gtk_widget_set_sensitive(copy_path_btn_ptr, 0_c_int)
       call gtk_widget_set_sensitive(delete_btn_ptr, 0_c_int)
+
+      ! Clear selection info from status bar when deselected
+      call sniffly_update_status("")
     end if
 
     ! Open in Finder button is always enabled (defaults to current directory)
