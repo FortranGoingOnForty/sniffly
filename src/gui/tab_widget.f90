@@ -194,12 +194,21 @@ contains
 
     print *, "Created new tab ", new_tab_index
 
+    ! Switch to the new tab
+    call switch_to_tab(new_tab_index)
+
     ! Rebuild tab bar to show the new tab
-    ! TODO: Implement proper clear_tab_bar to avoid duplicates
-    ! For now, just refresh which will add the new tab
     call refresh_tab_bar()
 
-    print *, "Tab bar refreshed with new tab"
+    ! Update visual states (yellow border on new active tab)
+    call update_tab_visual_states()
+
+    ! Update UI for the new tab (but don't auto-scan empty tabs)
+    if (associated(tab_switch_cb)) then
+      call tab_switch_cb()
+    end if
+
+    print *, "Tab bar refreshed and switched to new tab ", new_tab_index
   end subroutine on_plus_clicked
 
   ! Callback when a tab button is clicked
