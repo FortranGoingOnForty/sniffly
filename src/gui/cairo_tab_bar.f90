@@ -153,7 +153,7 @@ contains
       tab => get_tab(i)
       if (.not. associated(tab)) cycle
 
-      call draw_inactive_tab(cr, tab_rects(i)%x, TAB_MIN_WIDTH, trim(tab%label), i == hovered_tab)
+      call draw_inactive_tab(cr, tab_rects(i)%x, TAB_MIN_WIDTH, trim(tab%label), i == hovered_tab, i)
     end do
 
     ! Third pass: draw active tab last (so it appears on top)
@@ -161,15 +161,15 @@ contains
       tab => get_tab(active_tab_index)
       if (associated(tab)) then
         call draw_active_tab(cr, tab_rects(active_tab_index)%x, TAB_MIN_WIDTH, &
-                           trim(tab%label), active_tab_index == hovered_tab)
+                           trim(tab%label), active_tab_index == hovered_tab, active_tab_index)
       end if
     end if
   end subroutine on_draw_tabs
 
   ! Draw an active tab (full brightness, merges into canvas)
-  subroutine draw_active_tab(cr, x, width, label, is_hovered)
+  subroutine draw_active_tab(cr, x, width, label, is_hovered, tab_index)
     type(c_ptr), intent(in) :: cr
-    integer, intent(in) :: x, width
+    integer, intent(in) :: x, width, tab_index
     character(len=*), intent(in) :: label
     logical, intent(in) :: is_hovered
     real(c_double) :: x_d, y_d, w_d, h_d, radius
@@ -203,13 +203,13 @@ contains
     call draw_tab_label(cr, x, 0, width, TAB_HEIGHT, label, .false.)
 
     ! Draw close button
-    call draw_close_button(cr, x, width, .false.)
+    call draw_close_button(cr, x, width, .false., tab_index)
   end subroutine draw_active_tab
 
   ! Draw an inactive tab (dimmed, with bottom border)
-  subroutine draw_inactive_tab(cr, x, width, label, is_hovered)
+  subroutine draw_inactive_tab(cr, x, width, label, is_hovered, tab_index)
     type(c_ptr), intent(in) :: cr
-    integer, intent(in) :: x, width
+    integer, intent(in) :: x, width, tab_index
     character(len=*), intent(in) :: label
     logical, intent(in) :: is_hovered
     real(c_double) :: x_d, y_d, w_d, h_d, radius
@@ -243,7 +243,7 @@ contains
     call draw_tab_label(cr, x, 2, width, TAB_HEIGHT - 2, label, .true.)
 
     ! Draw close button
-    call draw_close_button(cr, x, width, .true.)
+    call draw_close_button(cr, x, width, .true., tab_index)
   end subroutine draw_inactive_tab
 
   ! Draw tab border without bottom (for active tab)
@@ -320,19 +320,35 @@ contains
   end subroutine draw_tab_label
 
   ! Draw close button (×)
-  subroutine draw_close_button(cr, tab_x, tab_width, is_dimmed)
+  subroutine draw_close_button(cr, tab_x, tab_width, is_dimmed, tab_index)
     type(c_ptr), intent(in) :: cr
-    integer, intent(in) :: tab_x, tab_width
+    integer, intent(in) :: tab_x, tab_width, tab_index
     logical, intent(in) :: is_dimmed
-    real(c_double) :: btn_x, btn_y, btn_size
+    real(c_double) :: btn_x, btn_y, btn_size, center_x, center_y
+    logical :: is_hovered
 
     btn_x = real(tab_x + tab_width - CLOSE_BUTTON_SIZE - CLOSE_BUTTON_MARGIN, c_double)
     btn_y = real((TAB_HEIGHT - CLOSE_BUTTON_SIZE) / 2, c_double)
     btn_size = real(CLOSE_BUTTON_SIZE, c_double)
+    center_x = btn_x + btn_size / 2.0_c_double
+    center_y = btn_y + btn_size / 2.0_c_double
+
+    ! Check if this close button is hovered
+    is_hovered = (hovered_close_button == tab_index)
+
+    ! Draw circular background when hovered
+    if (is_hovered) then
+      call cairo_set_source_rgb(cr, 0.6_c_double, 0.6_c_double, 0.6_c_double)
+      call cairo_arc(cr, center_x, center_y, btn_size / 2.0_c_double, 0.0_c_double, 6.28319_c_double)
+      call cairo_fill(cr)
+    end if
 
     ! Draw × symbol
     call cairo_set_line_width(cr, 1.5_c_double)
-    if (is_dimmed) then
+    if (is_hovered) then
+      ! White × when hovered
+      call cairo_set_source_rgb(cr, 1.0_c_double, 1.0_c_double, 1.0_c_double)
+    else if (is_dimmed) then
       call cairo_set_source_rgb(cr, 0.5_c_double, 0.5_c_double, 0.5_c_double)
     else
       call cairo_set_source_rgb(cr, 0.3_c_double, 0.3_c_double, 0.3_c_double)
@@ -391,10 +407,13 @@ contains
     use tab_manager, only: num_tabs
     type(c_ptr), value :: controller, user_data
     real(c_double), value :: x, y
-    integer :: i, old_hovered
+    integer :: i, old_hovered, old_hovered_close
+    integer :: close_btn_x, close_btn_y, close_btn_right, close_btn_bottom
 
     old_hovered = hovered_tab
+    old_hovered_close = hovered_close_button
     hovered_tab = 0
+    hovered_close_button = 0
 
     ! Check plus button
     if (x >= plus_button_x .and. x < plus_button_x + PLUS_BUTTON_WIDTH .and. &
@@ -406,13 +425,26 @@ contains
         if (x >= tab_rects(i)%x .and. x < tab_rects(i)%x + tab_rects(i)%width .and. &
             y >= tab_rects(i)%y .and. y < tab_rects(i)%y + tab_rects(i)%height) then
           hovered_tab = i
+
+          ! Check if mouse is over close button for this tab
+          close_btn_x = tab_rects(i)%x + tab_rects(i)%width - CLOSE_BUTTON_SIZE - CLOSE_BUTTON_MARGIN
+          close_btn_y = (TAB_HEIGHT - CLOSE_BUTTON_SIZE) / 2
+          close_btn_right = close_btn_x + CLOSE_BUTTON_SIZE
+          close_btn_bottom = close_btn_y + CLOSE_BUTTON_SIZE
+
+          if (x >= close_btn_x .and. x < close_btn_right .and. &
+              y >= close_btn_y .and. y < close_btn_bottom) then
+            hovered_close_button = i
+          end if
+
           exit
         end if
       end do
     end if
 
     ! Redraw if hover state changed
-    if (hovered_tab /= old_hovered .and. c_associated(tab_bar_widget)) then
+    if ((hovered_tab /= old_hovered .or. hovered_close_button /= old_hovered_close) .and. &
+        c_associated(tab_bar_widget)) then
       call gtk_widget_queue_draw(tab_bar_widget)
     end if
   end subroutine on_tab_motion
