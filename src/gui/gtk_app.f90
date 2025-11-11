@@ -32,6 +32,7 @@ module gtk_app
                                register_scan_completion_callback
   use tab_manager, only: tab_state, init_tab_manager, create_tab, get_active_tab, &
                          switch_to_tab, num_tabs, active_tab_index
+  use tab_widget, only: create_tab_bar, refresh_tab_bar
   implicit none
   private
 
@@ -175,7 +176,7 @@ contains
   ! Callback when application activates (startup)
   subroutine on_activate(app, user_data) bind(c)
     type(c_ptr), value :: app, user_data
-    type(c_ptr) :: drawing_area, main_box, toolbar, open_dir_btn, scan_btn, cancel_scan_btn, back_btn, forward_btn, up_btn, open_finder_btn, copy_path_btn, info_btn, toggle_dotfiles_btn, toggle_ext_btn, toggle_render_btn, delete_btn, status_bar, breadcrumb_widget
+    type(c_ptr) :: drawing_area, main_box, toolbar, open_dir_btn, scan_btn, cancel_scan_btn, back_btn, forward_btn, up_btn, open_finder_btn, copy_path_btn, info_btn, toggle_dotfiles_btn, toggle_ext_btn, toggle_render_btn, delete_btn, status_bar, breadcrumb_widget, tab_bar
     character(len=512) :: scan_path
     integer(c_int) :: idle_id
     integer :: first_tab_index
@@ -363,6 +364,17 @@ contains
                            c_funloc(on_delete_clicked), c_null_ptr)
     call gtk_box_append(toolbar, delete_btn)
     delete_btn_ptr = delete_btn  ! Store for enabling/disabling
+
+    ! Create tab bar (on right side of toolbar)
+    tab_bar = create_tab_bar()
+    if (c_associated(tab_bar)) then
+      call gtk_box_append(toolbar, tab_bar)
+      ! Populate with tabs
+      call refresh_tab_bar()
+      print *, "Tab bar added to toolbar"
+    else
+      print *, "ERROR: Failed to create tab bar"
+    end if
 
     ! Add toolbar to main box
     call gtk_box_append(main_box, toolbar)
