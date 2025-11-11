@@ -546,6 +546,7 @@ contains
     type(tab_state), pointer :: tab
     character(len=1024) :: selected_path
     integer :: status
+    integer(c_int) :: idle_id
 
     print *, "Open Directory button clicked!"
 
@@ -559,12 +560,12 @@ contains
     ! Call helper to show native file picker
     call show_native_directory_picker(selected_path, status)
 
-    ! Restore window focus after dialog (native dialogs steal focus on macOS)
-    if (c_associated(main_window_ptr)) then
-      call gtk_window_present(main_window_ptr)
-    end if
-
     if (status == 0 .and. len_trim(selected_path) > 0) then
+      ! Restore window focus after dialog using idle callback
+      ! (deferred to let macOS finish cleaning up osascript dialog)
+      if (c_associated(main_window_ptr)) then
+        idle_id = g_idle_add(c_funloc(restore_window_focus), c_null_ptr)
+      end if
       print *, "Selected directory: ", trim(selected_path)
 
       ! Update tab scan path (but don't scan yet)
@@ -1682,6 +1683,21 @@ contains
       call gtk_label_set_text(status_label_ptr, trim(message)//c_null_char)
     end if
   end subroutine sniffly_update_status
+
+  ! Idle callback to restore window focus after native dialogs
+  function restore_window_focus(user_data) bind(c) result(continue)
+    type(c_ptr), value :: user_data
+    integer(c_int) :: continue
+
+    ! Restore window focus
+    if (.not. app_is_shutting_down .and. c_associated(main_window_ptr)) then
+      call gtk_window_present(main_window_ptr)
+      print *, "Window focus restored after dialog"
+    end if
+
+    ! Return 0 to indicate the idle callback should not repeat (one-shot)
+    continue = 0_c_int
+  end function restore_window_focus
 
   ! Timeout callback to clear status message (called after 5 seconds)
   function clear_status_message(user_data) bind(c) result(continue)
