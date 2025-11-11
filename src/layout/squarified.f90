@@ -165,7 +165,7 @@ contains
       pivot_area%x = bounds%x
       pivot_area%y = bounds%y
       pivot_area%width = bounds%width
-      pivot_area%height = int((real(pivot_size, real64) / real(total_size, real64)) * real(bounds%height, real64))
+      pivot_area%height = nint((real(pivot_size, real64) / real(total_size, real64)) * real(bounds%height, real64))
       pivot_area%height = max(30, min(pivot_area%height, bounds%height - 30))
 
       remaining_area%x = bounds%x
@@ -175,7 +175,7 @@ contains
 
     else if (spiral_direction == 1) then
       ! RIGHT: Pivot on right, remaining on left
-      pivot_area%width = int((real(pivot_size, real64) / real(total_size, real64)) * real(bounds%width, real64))
+      pivot_area%width = nint((real(pivot_size, real64) / real(total_size, real64)) * real(bounds%width, real64))
       pivot_area%width = max(30, min(pivot_area%width, bounds%width - 30))
       pivot_area%x = bounds%x + bounds%width - pivot_area%width
       pivot_area%y = bounds%y
@@ -188,7 +188,7 @@ contains
 
     else if (spiral_direction == 2) then
       ! BOTTOM: Pivot at bottom, remaining above
-      pivot_area%height = int((real(pivot_size, real64) / real(total_size, real64)) * real(bounds%height, real64))
+      pivot_area%height = nint((real(pivot_size, real64) / real(total_size, real64)) * real(bounds%height, real64))
       pivot_area%height = max(30, min(pivot_area%height, bounds%height - 30))
       pivot_area%x = bounds%x
       pivot_area%y = bounds%y + bounds%height - pivot_area%height
@@ -203,7 +203,7 @@ contains
       ! LEFT: Pivot on left, remaining on right
       pivot_area%x = bounds%x
       pivot_area%y = bounds%y
-      pivot_area%width = int((real(pivot_size, real64) / real(total_size, real64)) * real(bounds%width, real64))
+      pivot_area%width = nint((real(pivot_size, real64) / real(total_size, real64)) * real(bounds%width, real64))
       pivot_area%width = max(30, min(pivot_area%width, bounds%width - 30))
       pivot_area%height = bounds%height
 
@@ -277,20 +277,25 @@ contains
       ! Calculate dynamic minimum based on available space
       ! If we have N items and W width, ensure each item gets at most W/N
       available_space = bounds%width
-      dynamic_min = max(2, available_space / actual_num_nodes)  ! At least 2 pixels
-      dynamic_min = min(dynamic_min, 10)  ! But prefer 10 if space allows
+      dynamic_min = max(1, available_space / actual_num_nodes)  ! At least 1 pixel per item
 
       ! Stack left-to-right
       offset = bounds%x
       do i = 1, actual_num_nodes
         if (i < actual_num_nodes) then
-          item_size = int((real(nodes(i)%size, real64) / real(actual_total_size, real64)) * real(bounds%width, real64))
+          ! Calculate proportional size
+          item_size = nint((real(nodes(i)%size, real64) / real(actual_total_size, real64)) * real(bounds%width, real64))
+          ! Apply minimum, but check we won't overflow
           item_size = max(dynamic_min, item_size)
+          ! Ensure we don't exceed remaining space
+          item_size = min(item_size, (bounds%x + bounds%width) - offset - (actual_num_nodes - i))
         else
-          ! Last item gets remaining space (prevents overflow)
-          item_size = bounds%x + bounds%width - offset
-          item_size = max(1, item_size)  ! Ensure at least 1 pixel
+          ! Last item gets ALL remaining space (prevents gaps/overlaps)
+          item_size = (bounds%x + bounds%width) - offset
         end if
+
+        ! Ensure at least 1 pixel
+        item_size = max(1, item_size)
 
         nodes(i)%bounds%x = offset
         nodes(i)%bounds%y = bounds%y
@@ -302,20 +307,25 @@ contains
     else
       ! Calculate dynamic minimum based on available space
       available_space = bounds%height
-      dynamic_min = max(1, available_space / actual_num_nodes)  ! At least 1 pixel
-      dynamic_min = min(dynamic_min, 3)  ! But prefer 3 if space allows
+      dynamic_min = max(1, available_space / actual_num_nodes)  ! At least 1 pixel per item
 
       ! Stack top-to-bottom
       offset = bounds%y
       do i = 1, actual_num_nodes
         if (i < actual_num_nodes) then
-          item_size = int((real(nodes(i)%size, real64) / real(actual_total_size, real64)) * real(bounds%height, real64))
+          ! Calculate proportional size
+          item_size = nint((real(nodes(i)%size, real64) / real(actual_total_size, real64)) * real(bounds%height, real64))
+          ! Apply minimum, but check we won't overflow
           item_size = max(dynamic_min, item_size)
+          ! Ensure we don't exceed remaining space
+          item_size = min(item_size, (bounds%y + bounds%height) - offset - (actual_num_nodes - i))
         else
-          ! Last item gets remaining space (prevents overflow)
-          item_size = bounds%y + bounds%height - offset
-          item_size = max(1, item_size)  ! Ensure at least 1 pixel
+          ! Last item gets ALL remaining space (prevents gaps/overlaps)
+          item_size = (bounds%y + bounds%height) - offset
         end if
+
+        ! Ensure at least 1 pixel
+        item_size = max(1, item_size)
 
         nodes(i)%bounds%x = bounds%x
         nodes(i)%bounds%y = offset
