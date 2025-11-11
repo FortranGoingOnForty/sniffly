@@ -42,6 +42,9 @@ module progressive_scanner
 
   type(scan_state_type), save :: scan_state
 
+  ! Idle callback ID for cancellation
+  integer(c_int), save :: scan_idle_id = 0_c_int
+
   ! Callback for scan updates (called after each directory is scanned)
   abstract interface
     subroutine scan_update_callback()
@@ -131,14 +134,32 @@ contains
     ! Register idle callback to process queue
     print *, "Registering idle callback for progressive scanning"
     idle_id = g_idle_add(c_funloc(scan_one_directory_idle), c_null_ptr)
+    scan_idle_id = idle_id
+    print *, "Idle callback registered with ID:", scan_idle_id
   end subroutine start_progressive_scan
 
   ! Stop the current scan
   subroutine stop_progressive_scan()
+    use g, only: g_source_remove
+    integer(c_int) :: result
     print *, "=== STOPPING PROGRESSIVE SCAN ==="
     scan_state%active = .false.
     scan_state%queue_size = 0
     scan_state%root => null()
+
+    ! Cancel the idle callback if it's still registered
+    if (scan_idle_id /= 0) then
+      print *, "Canceling idle callback ID:", scan_idle_id
+      result = g_source_remove(scan_idle_id)
+      if (result == 1_c_int) then
+        print *, "Successfully canceled idle callback"
+      else
+        print *, "Failed to cancel idle callback (may have already completed)"
+      end if
+      scan_idle_id = 0_c_int
+    else
+      print *, "No idle callback to cancel (ID was 0)"
+    end if
   end subroutine stop_progressive_scan
 
   ! Check if a scan is currently active
@@ -167,6 +188,7 @@ contains
     if (.not. scan_state%active .or. scan_state%queue_size == 0) then
       print *, "Progressive scan complete or stopped"
       scan_state%active = .false.
+      scan_idle_id = 0_c_int  ! Clear idle ID since callback is stopping
       if (associated(scan_state%root)) then
         scan_state%root%scan_complete = .true.
         scan_state%root%is_scanning = .false.
@@ -193,12 +215,21 @@ contains
       call update_callback()
     end if
 
+    ! Check again if we should stop (app might have closed during scan_single_directory)
+    if (.not. scan_state%active) then
+      print *, "Progressive scan stopped mid-callback"
+      scan_idle_id = 0_c_int
+      continue = 0_c_int
+      return
+    end if
+
     ! Continue if there are more directories
     if (scan_state%queue_size > 0) then
       continue = 1_c_int  ! Keep calling
     else
       print *, "Progressive scan complete!"
       scan_state%active = .false.
+      scan_idle_id = 0_c_int  ! Clear idle ID since scan is done
       if (associated(scan_state%root)) then
         scan_state%root%scan_complete = .true.
         scan_state%root%is_scanning = .false.

@@ -71,7 +71,8 @@ contains
     integer(int64), intent(in) :: total_size
     integer, intent(in) :: depth
     integer :: pivot_count, i, spiral_direction
-    integer(int64) :: pivot_size, remaining_size
+    integer :: max_stackable, stack_count
+    integer(int64) :: pivot_size, remaining_size, stack_size
     type(rect) :: pivot_area, remaining_area
     real(real64) :: size_ratio
 
@@ -85,8 +86,40 @@ contains
     end if
 
     ! Base case: very small area, just stack items
-    if (bounds%width < 30 .or. bounds%height < 30) then
-      call simple_stack(nodes, num_nodes, bounds, total_size, bounds%width >= bounds%height)
+    ! But limit how many items we try to stack in tight spaces
+    if (bounds%width < 100 .or. bounds%height < 100) then
+      ! Calculate how many items we can reasonably stack
+      ! Each item needs at least 30px to be useful (clickable, readable)
+      if (bounds%width >= bounds%height) then
+        ! Horizontal stacking
+        max_stackable = max(1, bounds%width / 30)
+      else
+        ! Vertical stacking
+        max_stackable = max(1, bounds%height / 30)
+      end if
+
+      ! Only stack the largest items that fit
+      stack_count = min(num_nodes, max_stackable)
+
+      ! Recalculate total size for items we're actually stacking
+      if (stack_count < num_nodes) then
+        stack_size = 0
+        do i = 1, stack_count
+          stack_size = stack_size + nodes(i)%size
+        end do
+
+        ! CRITICAL: Zero out bounds for culled items to prevent phantom rendering
+        do i = stack_count + 1, num_nodes
+          nodes(i)%bounds%x = 0
+          nodes(i)%bounds%y = 0
+          nodes(i)%bounds%width = 0
+          nodes(i)%bounds%height = 0
+        end do
+      else
+        stack_size = total_size
+      end if
+
+      call simple_stack(nodes, stack_count, bounds, stack_size, bounds%width >= bounds%height)
       return
     end if
 
@@ -109,7 +142,15 @@ contains
     end do
 
     ! Limit pivot group size
-    pivot_count = min(pivot_count, max(1, num_nodes / 3))
+    ! Conservative: don't take more than 1/3 of items, and consider space constraints
+    ! If bounds are tight (< 100px), be even more conservative
+    if (bounds%width < 100 .or. bounds%height < 100) then
+      ! Tight space: limit to max 3 items in pivot group
+      pivot_count = min(pivot_count, min(3, max(1, num_nodes / 3)))
+    else
+      ! Normal space: standard 1/3 rule
+      pivot_count = min(pivot_count, max(1, num_nodes / 3))
+    end if
 
     remaining_size = total_size - pivot_size
 
@@ -195,17 +236,60 @@ contains
     type(rect), intent(in) :: bounds
     integer(int64), intent(in) :: total_size
     logical, intent(in) :: horizontal
-    integer :: i, offset, item_size
+    integer :: i, offset, item_size, dynamic_min, available_space
+    integer :: actual_num_nodes, max_stackable
+    integer(int64) :: actual_total_size
+
+    ! CRITICAL: Check if we can actually fit all items with reasonable sizes
+    ! This prevents thin stacks from appearing anywhere in the spiral
+    if (horizontal) then
+      available_space = bounds%width
+      ! Each item needs at least 40px to be useful
+      max_stackable = max(1, available_space / 40)
+    else
+      available_space = bounds%height
+      ! Each item needs at least 40px to be useful
+      max_stackable = max(1, available_space / 40)
+    end if
+
+    ! Limit to what we can actually render
+    actual_num_nodes = min(num_nodes, max_stackable)
+
+    ! If we're culling items, recalculate total_size
+    if (actual_num_nodes < num_nodes) then
+      actual_total_size = 0
+      do i = 1, actual_num_nodes
+        actual_total_size = actual_total_size + nodes(i)%size
+      end do
+
+      ! CRITICAL: Zero out bounds for culled items to prevent phantom rendering
+      do i = actual_num_nodes + 1, num_nodes
+        nodes(i)%bounds%x = 0
+        nodes(i)%bounds%y = 0
+        nodes(i)%bounds%width = 0
+        nodes(i)%bounds%height = 0
+      end do
+    else
+      actual_total_size = total_size
+    end if
 
     if (horizontal) then
+      ! Calculate dynamic minimum based on available space
+      ! If we have N items and W width, ensure each item gets at most W/N
+      available_space = bounds%width
+      dynamic_min = max(2, available_space / actual_num_nodes)  ! At least 2 pixels
+      dynamic_min = min(dynamic_min, 10)  ! But prefer 10 if space allows
+
       ! Stack left-to-right
       offset = bounds%x
-      do i = 1, num_nodes
-        if (i < num_nodes) then
-          item_size = int((real(nodes(i)%size, real64) / real(total_size, real64)) * real(bounds%width, real64))
-          item_size = max(10, item_size)
+      do i = 1, actual_num_nodes
+        if (i < actual_num_nodes) then
+          item_size = int((real(nodes(i)%size, real64) / real(actual_total_size, real64)) * real(bounds%width, real64))
+          item_size = max(dynamic_min, item_size)
         else
+          ! Last item gets remaining space (prevents overflow)
           item_size = bounds%x + bounds%width - offset
+          item_size = max(1, item_size)  ! Ensure at least 1 pixel
         end if
 
         nodes(i)%bounds%x = offset
@@ -216,14 +300,21 @@ contains
         offset = offset + item_size
       end do
     else
+      ! Calculate dynamic minimum based on available space
+      available_space = bounds%height
+      dynamic_min = max(1, available_space / actual_num_nodes)  ! At least 1 pixel
+      dynamic_min = min(dynamic_min, 3)  ! But prefer 3 if space allows
+
       ! Stack top-to-bottom
       offset = bounds%y
-      do i = 1, num_nodes
-        if (i < num_nodes) then
-          item_size = int((real(nodes(i)%size, real64) / real(total_size, real64)) * real(bounds%height, real64))
-          item_size = max(3, item_size)
+      do i = 1, actual_num_nodes
+        if (i < actual_num_nodes) then
+          item_size = int((real(nodes(i)%size, real64) / real(actual_total_size, real64)) * real(bounds%height, real64))
+          item_size = max(dynamic_min, item_size)
         else
+          ! Last item gets remaining space (prevents overflow)
           item_size = bounds%y + bounds%height - offset
+          item_size = max(1, item_size)  ! Ensure at least 1 pixel
         end if
 
         nodes(i)%bounds%x = bounds%x
