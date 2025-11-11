@@ -818,6 +818,7 @@ contains
       global_scan_path = trim(nav_history(nav_history_pos))
       print *, "  Moving back to pos=", nav_history_pos
       print *, "  Path: ", trim(global_scan_path)
+      navigating_history = .true.  ! Set flag before triggering rescan
       call set_scan_path(trim(global_scan_path))
       call update_path_entry(trim(global_scan_path))
       call trigger_rescan(global_scan_path)
@@ -845,6 +846,7 @@ contains
       global_scan_path = trim(nav_history(nav_history_pos))
       print *, "  Moving forward to pos=", nav_history_pos
       print *, "  Path: ", trim(global_scan_path)
+      navigating_history = .true.  ! Set flag before triggering rescan
       call set_scan_path(trim(global_scan_path))
       call update_path_entry(trim(global_scan_path))
       call trigger_rescan(global_scan_path)
