@@ -57,18 +57,26 @@ Already implemented:
 
 ---
 
-## Phase 5: Integration - IN PROGRESS
+## Phase 5: Integration ✅ COMPLETE
 
-**TODO:**
-- [ ] Update `meson.build` to include breadcrumb_widget.f90
-- [ ] Replace old breadcrumb in `gtk_app.f90`
-- [ ] Remove old breadcrumb functions
-- [ ] Wire up navigation callback
-- [ ] Test build
+**Completed:**
+- ✅ Updated `meson.build` to include breadcrumb_widget.f90
+- ✅ Replaced old breadcrumb in `gtk_app.f90`
+- ✅ Removed old breadcrumb functions (sniffly_update_breadcrumbs, on_breadcrumb_clicked)
+- ✅ Wired up navigation callback
+- ✅ Test build SUCCESSFUL
+
+**Build status:** CLEAN (only unused parameter warnings)
 
 ---
 
-## Phase 6: Back/Forward Awareness - PENDING
+## Phase 6: Back/Forward Awareness - OPTIONAL (can skip)
+
+This is an advanced feature from the plan. The basic breadcrumb works without it.
+
+---
+
+## Phase 7: Testing - IN PROGRESS
 
 **TODO:**
 - [ ] Add history checking to draw function
