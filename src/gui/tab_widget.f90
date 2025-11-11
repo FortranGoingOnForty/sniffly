@@ -9,7 +9,8 @@ module tab_widget
                  gtk_widget_add_css_class, gtk_widget_remove_css_class, &
                  gtk_label_new, gtk_box_set_spacing, gtk_widget_set_hexpand, &
                  gtk_widget_set_halign, GTK_ALIGN_END
-  use tab_manager, only: tab_state, get_tab, num_tabs, active_tab_index
+  use tab_manager, only: tab_state, get_tab, num_tabs, active_tab_index, &
+                         MAX_TABS, switch_to_tab
   implicit none
   private
 
@@ -17,6 +18,9 @@ module tab_widget
 
   ! Tab bar container
   type(c_ptr), save :: tab_bar_container = c_null_ptr
+
+  ! Track button pointers to determine which tab was clicked
+  type(c_ptr), dimension(MAX_TABS), save :: tab_buttons = c_null_ptr
 
   ! Tab click callback interface
   abstract interface
