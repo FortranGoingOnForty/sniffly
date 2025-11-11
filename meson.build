@@ -1,7 +1,7 @@
 # Sniffly - Pure Fortran GUI Disk Analyzer
 # Build configuration using Meson
 
-project('sniffly', ['fortran', 'c'],
+project('sniffly', ['fortran', 'c', 'objc'],
   version: '0.2.4',  # Also maintained in VERSION file
   license: 'MIT',
   default_options: [
@@ -71,6 +71,7 @@ version_f90 = configure_file(
 # C helper sources (for file system operations)
 c_sources = [
   'src/core/dir_helpers.c',
+  'src/core/macos_file_picker.m',
 ]
 
 # Fortran source files
@@ -146,7 +147,7 @@ endif
 # -headerpad_max_install_names reserves space for dylibbundler to rewrite library paths
 link_args = []
 if host_machine.system() == 'darwin'
-  link_args += ['-Wl,-headerpad_max_install_names']
+  link_args += ['-Wl,-headerpad_max_install_names', '-framework', 'Cocoa']
 endif
 
 # Build executable
