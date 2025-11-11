@@ -1239,146 +1239,9 @@ contains
     end if
   end function count_files_recursive
 
-  ! Update breadcrumb bar with clickable path segments
-  subroutine sniffly_update_breadcrumbs()
-    use treemap_renderer, only: get_breadcrumb_path, get_path_depth
-    use gtk, only: gtk_button_new_with_label, gtk_box_remove
-    character(len=256), dimension(100) :: names
-    character(len=512) :: home_dir, segment_label
-    character(len=256) :: display_name
-    integer :: count, i, home_len, name_len, depth_to_navigate
-    logical :: is_home_path
-    type(c_ptr) :: button, separator, child
-    type(c_ptr) :: user_data_ptr
-
-    ! Guard against accessing widgets during shutdown
-    if (app_is_shutting_down) return
-
-    if (.not. c_associated(breadcrumb_box_ptr)) then
-      print *, "WARNING: breadcrumb_box_ptr not associated!"
-      return
-    end if
-
-    ! Get breadcrumb path from renderer
-    call get_breadcrumb_path(names, count)
-    print *, "Updating breadcrumbs: count=", count
-
-    ! Remove all existing breadcrumb widgets
-    do i = 1, breadcrumb_count
-      if (c_associated(breadcrumb_buttons(i))) then
-        child = gtk_widget_get_first_child(breadcrumb_box_ptr)
-        do while (c_associated(child))
-          call gtk_box_remove(breadcrumb_box_ptr, child)
-          child = gtk_widget_get_first_child(breadcrumb_box_ptr)
-        end do
-        exit
-      end if
-    end do
-    breadcrumb_count = 0
-
-    ! Get home directory for abbreviation
-    call get_environment_variable("HOME", home_dir)
-    home_len = len_trim(home_dir)
-
-    ! Create button for each path segment
-    do i = 1, min(count, MAX_BREADCRUMB_SEGMENTS)
-      display_name = names(i)
-
-      ! Replace home directory with ~ for first segment
-      if (i == 1 .and. home_len > 0) then
-        name_len = len_trim(names(i))
-        is_home_path = .false.
-
-        if (name_len >= home_len) then
-          if (names(i)(1:home_len) == home_dir(1:home_len)) then
-            is_home_path = .true.
-          end if
-        end if
-
-        if (is_home_path) then
-          if (name_len == home_len) then
-            display_name = "~"
-          else if (names(i)(home_len+1:home_len+1) == "/") then
-            display_name = "~" // trim(names(i)(home_len+1:name_len))
-          end if
-        end if
-      end if
-
-      ! Extract just the last component for nested paths
-      if (i > 1) then
-        ! Find last slash and take component after it
-        name_len = len_trim(names(i))
-        do depth_to_navigate = name_len, 1, -1
-          if (names(i)(depth_to_navigate:depth_to_navigate) == '/') then
-            display_name = names(i)(depth_to_navigate+1:name_len)
-            exit
-          end if
-        end do
-      end if
-
-      ! Add separator before button (except first)
-      if (i > 1) then
-        separator = gtk_label_new(" > "//c_null_char)
-        call gtk_box_append(breadcrumb_box_ptr, separator)
-      end if
-
-      ! Create clickable button for this segment
-      segment_label = trim(display_name)
-      button = gtk_button_new_with_label(trim(segment_label)//c_null_char)
-
-      ! Store depth information as user data (count - i = levels to go up)
-      depth_to_navigate = count - i
-      user_data_ptr = transfer(depth_to_navigate, user_data_ptr)
-
-      ! Connect click handler
-      call g_signal_connect(button, "clicked"//c_null_char, &
-                           c_funloc(on_breadcrumb_clicked), user_data_ptr)
-
-      ! Add to box
-      call gtk_box_append(breadcrumb_box_ptr, button)
-
-      ! Store button reference
-      breadcrumb_count = breadcrumb_count + 1
-      breadcrumb_buttons(breadcrumb_count) = button
-    end do
-
-    print *, "Created ", breadcrumb_count, " clickable breadcrumb segments"
-  end subroutine sniffly_update_breadcrumbs
-
-  ! Breadcrumb button click handler
-  subroutine on_breadcrumb_clicked(button, user_data) bind(c)
-    use treemap_renderer, only: navigate_up
-    use gtk, only: gtk_widget_queue_draw
-    use treemap_widget, only: get_widget_ptr
-    type(c_ptr), value :: button, user_data
-    integer :: levels_to_go_up
-    type(c_ptr) :: widget
-
-    ! Extract depth from user data
-    levels_to_go_up = transfer(user_data, levels_to_go_up)
-
-    print *, "Breadcrumb clicked: navigating up ", levels_to_go_up, " levels"
-
-    if (levels_to_go_up > 0) then
-      ! Navigate up by the specified number of levels
-      call navigate_up(levels_to_go_up)
-
-      ! Update breadcrumbs and history
-      call breadcrumb_callback()
-
-      ! Redraw treemap
-      widget = get_widget_ptr()
-      if (c_associated(widget)) then
-        call gtk_widget_queue_draw(widget)
-      end if
-    else
-      print *, "Already at this level (depth = 0)"
-    end if
-  end subroutine on_breadcrumb_clicked
-
   ! Callback wrapper for navigation events (no arguments)
   subroutine breadcrumb_callback()
-    use treemap_renderer, only: get_breadcrumb_path, get_current_view_node
+    use treemap_renderer, only: get_current_view_node
     use types, only: file_node
     type(file_node), pointer :: current_view
 
@@ -1389,9 +1252,11 @@ contains
     if (associated(current_view) .and. allocated(current_view%path)) then
       global_scan_path = trim(current_view%path)
       print *, "  Synced global_scan_path to: ", trim(global_scan_path)
+
+      ! Update breadcrumb widget with new path
+      call update_breadcrumb_cache(trim(current_view%path))
     end if
 
-    call sniffly_update_breadcrumbs()
     call sniffly_update_status_bar_stats()
 
     ! Always add current path to navigation history
@@ -1592,8 +1457,10 @@ contains
     ! Invalidate layout to force recalculation
     call invalidate_layout()
 
-    ! Update breadcrumbs after scan
-    call sniffly_update_breadcrumbs()
+    ! Update breadcrumbs after scan (use global_scan_path)
+    if (len_trim(global_scan_path) > 0) then
+      call update_breadcrumb_cache(trim(global_scan_path))
+    end if
 
     ! Update status bar with file statistics
     call sniffly_update_status_bar_stats()
@@ -1622,8 +1489,10 @@ contains
     ! Invalidate layout to force recalculation
     call invalidate_layout()
 
-    ! Update breadcrumbs after scan
-    call sniffly_update_breadcrumbs()
+    ! Update breadcrumbs after scan (use pending_scan_path)
+    if (len_trim(pending_scan_path) > 0) then
+      call update_breadcrumb_cache(trim(pending_scan_path))
+    end if
 
     ! Update status bar with file statistics
     call sniffly_update_status_bar_stats()
