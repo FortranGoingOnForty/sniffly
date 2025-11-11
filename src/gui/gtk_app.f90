@@ -35,8 +35,7 @@ module gtk_app
   public :: sniffly_app_run, sniffly_app_quit, sniffly_set_scan_path, &
             sniffly_update_status, breadcrumb_callback, &
             sniffly_update_progress, sniffly_show_progress, sniffly_hide_progress, &
-            sniffly_update_status_bar_stats, get_forward_path, &
-            set_breadcrumb_navigation_flag
+            sniffly_update_status_bar_stats, get_forward_path
 
   ! Application constants
   character(len=*), parameter :: APP_ID = "org.fortrangoingonforty.sniffly"
@@ -1253,11 +1252,6 @@ contains
     end if
   end function get_forward_path
 
-  ! Set flag for breadcrumb navigation (to preserve forward context)
-  subroutine set_breadcrumb_navigation_flag()
-    navigating_history = .true.
-  end subroutine set_breadcrumb_navigation_flag
-
   ! Callback wrapper for navigation events (no arguments)
   subroutine breadcrumb_callback()
     use treemap_renderer, only: get_current_view_node
@@ -1286,15 +1280,21 @@ contains
 
     call sniffly_update_status_bar_stats()
 
-    ! Add to history ONLY if this is a new navigation (not back/forward)
-    if (.not. navigating_history) then
+    ! Add to history ONLY if this is a new navigation (not back/forward/breadcrumb)
+    ! Check if we have a forward path - if so, we're in history navigation mode
+    if (.not. navigating_history .and. len_trim(fwd_path) == 0) then
+      ! No forward path AND not navigating history = truly new navigation
       if (len_trim(global_scan_path) > 0) then
         print *, "  Calling add_to_history (new navigation)..."
         call add_to_history(global_scan_path)
       end if
     else
-      print *, "  Skipping add_to_history (history navigation)"
-      navigating_history = .false.  ! Reset flag
+      if (navigating_history) then
+        print *, "  Skipping add_to_history (back/forward button navigation)"
+        navigating_history = .false.  ! Reset flag
+      else
+        print *, "  Skipping add_to_history (breadcrumb navigation with forward context)"
+      end if
     end if
 
     ! Update button states now that history may have changed

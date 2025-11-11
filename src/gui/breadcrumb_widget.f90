@@ -431,7 +431,6 @@ contains
   ! Click callback - handle navigation
   subroutine on_breadcrumb_click(gesture, n_press, x, y, user_data) bind(c)
     use treemap_renderer, only: get_current_view_node, scan_directory
-    use gtk_app, only: set_breadcrumb_navigation_flag
     use types, only: file_node
     type(c_ptr), value :: gesture, user_data
     integer(c_int), value :: n_press
@@ -469,9 +468,7 @@ contains
       end if
 
       print *, "Navigating to: ", target_path
-
-      ! Set flag to treat this as history navigation (preserves forward path)
-      call set_breadcrumb_navigation_flag()
+      print *, "  (breadcrumb navigation - should preserve forward context)"
 
       ! Scan the target directory
       ! This will update the current view and trigger callbacks
