@@ -483,10 +483,13 @@ contains
   function find_segment_at_position(x, y) result(segment_index)
     real(c_double), intent(in) :: x, y
     integer :: segment_index
-    integer :: i
+    integer :: i, total_segments
 
     segment_index = 0
-    do i = 1, cached_segment_count
+    total_segments = cached_segment_count + cached_forward_segment_count
+
+    ! Check all segments (regular + forward)
+    do i = 1, total_segments
       if (x >= segment_rects(i)%x .and. &
           x <= segment_rects(i)%x + segment_rects(i)%width .and. &
           y >= segment_rects(i)%y .and. &
