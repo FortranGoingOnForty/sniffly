@@ -25,7 +25,8 @@ module treemap_renderer
             get_node_center_by_index, find_node_in_direction, register_progress_callback, &
             scan_directory, invalidate_layout, get_current_view_node, remove_selected_node_from_view, &
             clear_cache, toggle_file_extensions, toggle_age_based_coloring, toggle_size_display_mode, &
-            toggle_hidden_files, toggle_render_mode, set_redraw_widget, register_scan_completion_callback
+            toggle_hidden_files, toggle_render_mode, set_redraw_widget, register_scan_completion_callback, &
+            set_renderer_state_from_tab
 
   ! Callback interfaces for progress updates
   abstract interface
@@ -208,6 +209,33 @@ contains
     type(file_node), pointer :: node_ptr
     node_ptr => current_view_node
   end function get_current_view_node
+
+  ! Set renderer state from tab (for tab switching)
+  subroutine set_renderer_state_from_tab(tab_root, tab_current_view, tab_has_data)
+    type(file_node), pointer, intent(in) :: tab_root, tab_current_view
+    logical, intent(in) :: tab_has_data
+
+    print *, "=== SET_RENDERER_STATE_FROM_TAB ==="
+    print *, "  tab_has_data: ", tab_has_data
+
+    ! Update global renderer state to match the tab
+    has_data = tab_has_data
+
+    if (tab_has_data .and. associated(tab_root)) then
+      ! Copy tab's tree data to renderer globals
+      root_node = tab_root
+      current_view_node => tab_current_view
+      print *, "  Synced renderer to tab's tree data"
+    else
+      ! Empty tab - nullify current view
+      current_view_node => null()
+      has_data = .false.
+      print *, "  Tab is empty - cleared renderer state"
+    end if
+
+    ! Invalidate layout to force recalculation
+    layout_calculated = .false.
+  end subroutine set_renderer_state_from_tab
 
   ! Scan directory and prepare for rendering
   subroutine scan_directory(path)

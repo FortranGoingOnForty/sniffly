@@ -30,7 +30,7 @@ module gtk_app
                                 set_navigation_callback, get_previous_breadcrumb_path, &
                                 clear_previous_breadcrumb_path
   use treemap_renderer, only: register_progress_callback, scan_directory, set_redraw_widget, &
-                               register_scan_completion_callback
+                               register_scan_completion_callback, set_renderer_state_from_tab
   use tab_manager, only: tab_state, init_tab_manager, create_tab, get_active_tab, &
                          switch_to_tab, num_tabs, active_tab_index, get_path_basename
   use tab_widget, only: create_tab_bar, refresh_tab_bar, register_tab_switch_callback, &
@@ -937,6 +937,9 @@ contains
 
     print *, "  Active tab index: ", active_tab_index
     print *, "  Tab has_data: ", tab%has_data
+
+    ! Sync renderer state with active tab (CRITICAL for correct rendering)
+    call set_renderer_state_from_tab(tab%root_node, tab%current_view_node, tab%has_data)
 
     ! Check if tab has data
     if (.not. tab%has_data) then
