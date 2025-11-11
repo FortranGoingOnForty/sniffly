@@ -87,6 +87,10 @@ module gtk_app
   ! Open directory button pointer (for pulsing on empty tabs)
   type(c_ptr), save :: open_dir_btn_ptr = c_null_ptr
 
+  ! Toggle button pointers (for active state indicators)
+  type(c_ptr), save :: toggle_dotfiles_btn_ptr = c_null_ptr
+  logical, save :: dotfiles_button_active = .true.  ! Track button state (starts true since hidden files shown by default)
+
   ! Drawing area pointer (for redrawing treemap)
   type(c_ptr), save :: drawing_area_ptr = c_null_ptr
 
@@ -356,8 +360,10 @@ contains
 
     ! Toggle Dotfiles button
     toggle_dotfiles_btn = gtk_button_new()
+    toggle_dotfiles_btn_ptr = toggle_dotfiles_btn  ! Store reference for state updates
     call gtk_button_set_icon_name(toggle_dotfiles_btn, "view-reveal-symbolic"//c_null_char)
     call gtk_widget_set_tooltip_text(toggle_dotfiles_btn, "Toggle Hidden Files/Dotfiles"//c_null_char)
+    call gtk_widget_add_css_class(toggle_dotfiles_btn, "suggested-action"//c_null_char)  ! Start active (hidden files shown by default)
     call g_signal_connect(toggle_dotfiles_btn, "clicked"//c_null_char, &
                            c_funloc(on_toggle_dotfiles_clicked), c_null_ptr)
     call gtk_box_append(toolbar, toggle_dotfiles_btn)
@@ -517,17 +523,8 @@ contains
     type(c_ptr) :: css_provider, display
     character(len=:), allocatable :: css_data
 
-    ! CSS with pulsing animation for suggested-action class (empty tabs)
-    ! and card border styling to match active tab appearance
+    ! CSS for canvas card border styling
     css_data = &
-      "@keyframes pulse { " // &
-      "0% { opacity: 1.0; } " // &
-      "50% { opacity: 0.5; } " // &
-      "100% { opacity: 1.0; } " // &
-      "} " // &
-      ".suggested-action { " // &
-      "animation: pulse 1.5s ease-in-out infinite; " // &
-      "} " // &
       ".canvas-card { " // &
       "background-color: rgba(250, 250, 250, 1.0); " // &
       "border: 1px solid rgba(179, 179, 179, 1.0); " // &
@@ -543,10 +540,10 @@ contains
     ! Get default display
     display = gdk_display_get_default()
 
-    ! Add CSS provider to display (600 = GTK_STYLE_PROVIDER_PRIORITY_APPLICATION)
-    call gtk_style_context_add_provider_for_display(display, css_provider, 600_c_int)
+    ! Add CSS provider to display (800 = GTK_STYLE_PROVIDER_PRIORITY_USER)
+    call gtk_style_context_add_provider_for_display(display, css_provider, 800_c_int)
 
-    print *, "Custom CSS loaded (pulsing animation + canvas card styling)"
+    print *, "Custom CSS loaded (canvas card styling)"
   end subroutine load_custom_css
 
   ! Callback when Open Directory button is clicked
@@ -1362,6 +1359,7 @@ contains
   ! Callback when Toggle Dotfiles button is clicked
   subroutine on_toggle_dotfiles_clicked(button, user_data) bind(c)
     use treemap_renderer, only: toggle_hidden_files
+    use gtk, only: gtk_widget_add_css_class, gtk_widget_remove_css_class
     type(c_ptr), value :: button, user_data
     type(tab_state), pointer :: tab
 
@@ -1372,8 +1370,25 @@ contains
       return
     end if
 
+    ! Toggle the hidden files state in renderer
     call toggle_hidden_files()
-    call sniffly_update_status("Toggled hidden files visibility - rescanning...")
+
+    ! Toggle our button state tracker
+    dotfiles_button_active = .not. dotfiles_button_active
+
+    print *, "DEBUG: dotfiles_button_active =", dotfiles_button_active
+    print *, "DEBUG: toggle_dotfiles_btn_ptr associated?", c_associated(toggle_dotfiles_btn_ptr)
+
+    ! Update button visual state - toggle GTK's built-in suggested-action class
+    if (dotfiles_button_active) then
+      print *, "DEBUG: Adding 'suggested-action' CSS class"
+      call gtk_widget_add_css_class(toggle_dotfiles_btn_ptr, "suggested-action"//c_null_char)
+      call sniffly_update_status("Showing hidden files - rescanning...")
+    else
+      print *, "DEBUG: Removing 'suggested-action' CSS class"
+      call gtk_widget_remove_css_class(toggle_dotfiles_btn_ptr, "suggested-action"//c_null_char)
+      call sniffly_update_status("Hiding hidden files - rescanning...")
+    end if
 
     ! Trigger rescan to apply the filter
     if (len_trim(tab%scan_path) > 0) then
