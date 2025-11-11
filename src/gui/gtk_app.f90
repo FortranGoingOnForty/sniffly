@@ -101,6 +101,9 @@ contains
 
   ! Quit the application
   subroutine sniffly_app_quit()
+    use progressive_scanner, only: stop_progressive_scan
+    ! Stop any active scans before destroying window
+    call stop_progressive_scan()
     if (c_associated(main_window_ptr)) then
       call gtk_window_destroy(main_window_ptr)
       main_window_ptr = c_null_ptr
@@ -1211,6 +1214,9 @@ contains
 
   ! Callback wrapper for quit events (no arguments)
   subroutine quit_callback_wrapper()
+    use progressive_scanner, only: stop_progressive_scan
+    ! Stop any active scans before quitting
+    call stop_progressive_scan()
     call sniffly_app_quit()
   end subroutine quit_callback_wrapper
 
