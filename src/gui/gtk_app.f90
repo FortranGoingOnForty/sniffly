@@ -674,26 +674,17 @@ contains
     ! Check if scan is active - disable buttons during scan
     scan_active = is_scan_active()
 
-    print *, "DEBUG: update_history_buttons() called"
-    print *, "DEBUG:   nav_history_pos =", nav_history_pos
-    print *, "DEBUG:   nav_history_count =", nav_history_count
-    print *, "DEBUG:   scan_active =", scan_active
-
     ! Enable Back if we're not at the start of history AND scan is not active
     if (nav_history_pos > 1 .and. .not. scan_active) then
-      print *, "DEBUG:   Enabling Back button"
       call gtk_widget_set_sensitive(back_btn_ptr, 1_c_int)
     else
-      print *, "DEBUG:   Disabling Back button"
       call gtk_widget_set_sensitive(back_btn_ptr, 0_c_int)
     end if
 
     ! Enable Forward if we're not at the end of history AND scan is not active
     if (nav_history_pos > 0 .and. nav_history_pos < nav_history_count .and. .not. scan_active) then
-      print *, "DEBUG:   Enabling Forward button"
       call gtk_widget_set_sensitive(forward_btn_ptr, 1_c_int)
     else
-      print *, "DEBUG:   Disabling Forward button"
       call gtk_widget_set_sensitive(forward_btn_ptr, 0_c_int)
     end if
   end subroutine update_history_buttons
@@ -1365,7 +1356,6 @@ contains
     current_view => get_current_view_node()
     if (associated(current_view) .and. allocated(current_view%path)) then
       global_scan_path = trim(current_view%path)
-      print *, "DEBUG: Synced global_scan_path to: ", trim(global_scan_path)
     end if
 
     call sniffly_update_breadcrumbs()
@@ -1375,7 +1365,6 @@ contains
     if (.not. suppress_history_add) then
       if (len_trim(global_scan_path) > 0) then
         call add_to_history(global_scan_path)
-        print *, "DEBUG: Added to history: ", trim(global_scan_path)
       end if
     end if
 
