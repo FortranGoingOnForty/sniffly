@@ -1974,11 +1974,28 @@ contains
   ! Callback wrapper for scan completion
   subroutine scan_complete_callback_wrapper()
     use treemap_widget, only: mark_initial_scan_complete
+    use treemap_renderer, only: get_root_node, get_current_view_node
+    use types, only: file_node
+    type(tab_state), pointer :: tab
+    type(file_node), pointer :: root, current_view
 
     print *, "=== SCAN COMPLETE CALLBACK FIRED ==="
 
     ! Call the original completion callback
     call mark_initial_scan_complete()
+
+    ! Sync active tab's state with renderer (tab now has data)
+    tab => get_active_tab()
+    if (associated(tab)) then
+      root => get_root_node()
+      current_view => get_current_view_node()
+      if (associated(root)) then
+        tab%has_data = .true.
+        tab%root_node => root
+        tab%current_view_node => current_view
+        print *, "=== SYNCED TAB STATE AFTER SCAN COMPLETE ==="
+      end if
+    end if
 
     ! Update cancel button (scan is done, should be disabled and grey)
     print *, "=== UPDATING CANCEL BUTTON FROM COMPLETION CALLBACK ==="
@@ -1987,6 +2004,10 @@ contains
     ! Re-enable back/forward buttons if there's history
     print *, "=== RE-ENABLING NAVIGATION BUTTONS ==="
     call update_history_buttons()
+
+    ! Update UI for active tab (removes blue pulsing if tab now has data)
+    print *, "=== UPDATING UI FOR ACTIVE TAB (SCAN COMPLETE) ==="
+    call update_ui_for_active_tab()
 
     ! Complete any pending synthetic navigation
     if (pending_synthetic_nav) then
