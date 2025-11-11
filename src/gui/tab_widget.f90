@@ -14,7 +14,7 @@ module tab_widget
   implicit none
   private
 
-  public :: create_tab_bar, refresh_tab_bar, get_tab_bar_widget
+  public :: create_tab_bar, refresh_tab_bar, get_tab_bar_widget, update_tab_visual_states
 
   ! Tab bar container
   type(c_ptr), save :: tab_bar_container = c_null_ptr
@@ -100,14 +100,15 @@ contains
       tab_btn = gtk_button_new_with_label(trim(label_text)//c_null_char)
       call gtk_widget_set_size_request(tab_btn, 120_c_int, 28_c_int)
 
+      ! Store button pointer so we can identify which tab was clicked
+      tab_buttons(i) = tab_btn
+
       ! Add yellow border if active tab
       if (i == active_tab_index) then
         call gtk_widget_add_css_class(tab_btn, "active-tab"//c_null_char)
       end if
 
-      ! Connect click handler with tab index as user_data
-      ! NOTE: We'll use a workaround since we can't easily pass integer user_data
-      ! For now, connect a generic handler and determine tab index by position
+      ! Connect click handler
       call g_signal_connect(tab_btn, "clicked"//c_null_char, &
                             c_funloc(on_tab_clicked), c_null_ptr)
 
@@ -124,6 +125,25 @@ contains
     widget = tab_bar_container
   end function get_tab_bar_widget
 
+  ! Update visual states of tab buttons (yellow border for active tab)
+  subroutine update_tab_visual_states()
+    integer :: i
+
+    ! Update CSS classes for all tab buttons
+    do i = 1, num_tabs
+      if (.not. c_associated(tab_buttons(i))) cycle
+
+      ! Remove or add active-tab class based on whether this is the active tab
+      if (i == active_tab_index) then
+        call gtk_widget_add_css_class(tab_buttons(i), "active-tab"//c_null_char)
+      else
+        call gtk_widget_remove_css_class(tab_buttons(i), "active-tab"//c_null_char)
+      end if
+    end do
+
+    print *, "Updated tab visual states - active tab: ", active_tab_index
+  end subroutine update_tab_visual_states
+
   ! Callback when plus button is clicked
   subroutine on_plus_clicked(button, user_data) bind(c)
     type(c_ptr), value :: button, user_data
@@ -134,9 +154,37 @@ contains
   ! Callback when a tab button is clicked
   subroutine on_tab_clicked(button, user_data) bind(c)
     type(c_ptr), value :: button, user_data
-    print *, "Tab button clicked"
-    ! TODO: Determine which tab was clicked and call tab_click_cb
-    ! This will require iterating through children or storing button pointers
+    integer :: i, clicked_tab_index
+
+    ! Find which tab was clicked by comparing button pointers
+    clicked_tab_index = -1
+    do i = 1, num_tabs
+      if (c_associated(tab_buttons(i), button)) then
+        clicked_tab_index = i
+        exit
+      end if
+    end do
+
+    if (clicked_tab_index == -1) then
+      print *, "WARNING: Could not determine which tab was clicked"
+      return
+    end if
+
+    print *, "Tab ", clicked_tab_index, " clicked"
+
+    ! If already on this tab, nothing to do
+    if (clicked_tab_index == active_tab_index) then
+      print *, "Already on tab ", clicked_tab_index
+      return
+    end if
+
+    ! Switch to the clicked tab
+    call switch_to_tab(clicked_tab_index)
+
+    ! Update tab visual states (yellow border)
+    call update_tab_visual_states()
+
+    print *, "Switched to tab ", clicked_tab_index
   end subroutine on_tab_clicked
 
   ! Register tab click callback
