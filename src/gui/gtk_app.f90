@@ -1482,13 +1482,8 @@ contains
     ! Invalidate layout to force recalculation
     call invalidate_layout()
 
-    ! Update breadcrumbs after scan (use global_scan_path)
-    if (len_trim(global_scan_path) > 0) then
-      call update_breadcrumb_cache(trim(global_scan_path))
-    end if
-
-    ! Update status bar with file statistics
-    call sniffly_update_status_bar_stats()
+    ! Update breadcrumbs and status via callback (handles forward path lookahead)
+    call breadcrumb_callback()
 
     ! Trigger redraw to show the scanned data
     if (c_associated(main_window_ptr)) then
