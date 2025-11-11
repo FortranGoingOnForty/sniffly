@@ -222,10 +222,6 @@ contains
     end if
     print *, "Created initial tab ", first_tab_index, " for: ", trim(scan_path)
 
-    ! TEMPORARY: Create a second tab for testing tab switching
-    first_tab_index = create_tab(get_home_directory())
-    print *, "Created second tab for testing: ", trim(get_home_directory())
-
     ! Create main vertical box (toolbar + treemap)
     main_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0_c_int)
 
