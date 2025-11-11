@@ -1,0 +1,20 @@
+=== FINAL TREE STRUCTURE ===
+. is_file=F has_next_sib=F
+app is_file=F has_next_sib=T
+main.f90 is_file=T has_next_sib=F
+src is_file=F has_next_sib=T
+core is_file=F has_next_sib=T
+dir_helpers.c is_file=T has_next_sib=T
+file_system.f90 is_file=T has_next_sib=T
+types.f90 is_file=T has_next_sib=F
+gui is_file=F has_next_sib=F
+gtk_app.f90 is_file=T has_next_sib=F
+.gitignore is_file=T has_next_sib=T
+GETTING_STARTED.md is_file=T has_next_sib=T
+LICENSE is_file=T has_next_sib=T
+PROJECT_SUMMARY.md is_file=T has_next_sib=T
+QUICKSTART.md is_file=T has_next_sib=T
+README.md is_file=T has_next_sib=T
+SNIFFLY_MASTER_PLAN.md is_file=T has_next_sib=T
+TECHNICAL_STACK.md is_file=T has_next_sib=T
+meson.build is_file=T has_next_sib=F
