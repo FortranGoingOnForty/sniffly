@@ -179,6 +179,14 @@ contains
 
     ! Parse remaining segments
     do while (start_pos <= len_trim(working_path) .and. cached_segment_count < MAX_SEGMENTS)
+      ! Skip any leading slashes
+      do while (start_pos <= len_trim(working_path) .and. working_path(start_pos:start_pos) == "/")
+        start_pos = start_pos + 1
+      end do
+
+      ! Check if we've reached the end
+      if (start_pos > len_trim(working_path)) exit
+
       ! Find next slash
       slash_pos = index(working_path(start_pos:), "/")
 
@@ -192,15 +200,8 @@ contains
         else
           cached_segment_paths(cached_segment_count) = trim(working_path)
         end if
-        ! Extract just the name (remove any leading/trailing slashes)
-        cached_segment_names(cached_segment_count) = trim(adjustl(working_path(start_pos:)))
-        ! Remove leading slash if present
-        if (len_trim(cached_segment_names(cached_segment_count)) > 0) then
-          if (cached_segment_names(cached_segment_count)(1:1) == "/") then
-            cached_segment_names(cached_segment_count) = &
-              trim(cached_segment_names(cached_segment_count)(2:))
-          end if
-        end if
+        ! Extract just the name
+        cached_segment_names(cached_segment_count) = trim(working_path(start_pos:))
         print *, "  Segment ", cached_segment_count, ": ", &
                  trim(cached_segment_paths(cached_segment_count)), " -> ", &
                  trim(cached_segment_names(cached_segment_count))
@@ -215,15 +216,8 @@ contains
         else
           cached_segment_paths(cached_segment_count) = trim(working_path(1:start_pos+slash_pos-2))
         end if
-        ! Extract just the name (remove any leading/trailing slashes)
-        cached_segment_names(cached_segment_count) = trim(adjustl(working_path(start_pos:start_pos+slash_pos-2)))
-        ! Remove leading slash if present
-        if (len_trim(cached_segment_names(cached_segment_count)) > 0) then
-          if (cached_segment_names(cached_segment_count)(1:1) == "/") then
-            cached_segment_names(cached_segment_count) = &
-              trim(cached_segment_names(cached_segment_count)(2:))
-          end if
-        end if
+        ! Extract just the name
+        cached_segment_names(cached_segment_count) = trim(working_path(start_pos:start_pos+slash_pos-2))
         print *, "  Segment ", cached_segment_count, ": ", &
                  trim(cached_segment_paths(cached_segment_count)), " -> ", &
                  trim(cached_segment_names(cached_segment_count))
