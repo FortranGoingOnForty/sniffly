@@ -20,7 +20,7 @@ module gtk_app
                  gtk_entry_set_placeholder_text, gtk_widget_add_css_class, &
                  gtk_widget_remove_css_class
   use gdk, only: gdk_display_get_default, gdk_display_get_clipboard, gdk_clipboard_set_text
-  use g, only: g_application_run, g_idle_add
+  use g, only: g_application_run, g_idle_add, g_timeout_add_seconds_once
   use treemap_widget, only: create_treemap_widget, set_scan_path, register_navigation_callback, &
                              register_key_handler, register_quit_callback, register_delete_callback, &
                              register_refresh_callback, register_selection_callback, mark_initial_scan_complete, &
@@ -34,7 +34,7 @@ module gtk_app
   private
 
   public :: sniffly_app_run, sniffly_app_quit, sniffly_set_scan_path, &
-            sniffly_update_status, breadcrumb_callback, &
+            sniffly_update_status, sniffly_show_error, breadcrumb_callback, &
             sniffly_update_progress, sniffly_show_progress, sniffly_hide_progress, &
             sniffly_update_status_bar_stats, get_forward_path
 
@@ -77,6 +77,11 @@ module gtk_app
   type(c_ptr), save :: copy_path_btn_ptr = c_null_ptr
   type(c_ptr), save :: open_finder_btn_ptr = c_null_ptr
   type(c_ptr), save :: delete_btn_ptr = c_null_ptr
+
+  ! Pending navigation state for synthetic paths
+  logical, save :: pending_synthetic_nav = .false.
+  character(len=512), save :: pending_synthetic_child_name = ""
+  integer, save :: synthetic_nav_attempts = 0  ! Count attempts to avoid infinite loops
 
 contains
 
@@ -299,10 +304,10 @@ contains
     call gtk_box_append(toolbar, copy_path_btn)
     copy_path_btn_ptr = copy_path_btn  ! Store for enabling/disabling
 
-    ! Create Properties/Info button
+    ! Create Properties/Info button (opens macOS Get Info window)
     info_btn = gtk_button_new()
-    call gtk_button_set_icon_name(info_btn, "document-properties"//c_null_char)
-    call gtk_widget_set_tooltip_text(info_btn, "Show Properties/Info"//c_null_char)
+    call gtk_button_set_icon_name(info_btn, "dialog-information"//c_null_char)
+    call gtk_widget_set_tooltip_text(info_btn, "Show in Finder Info"//c_null_char)
     call g_signal_connect(info_btn, "clicked"//c_null_char, &
                            c_funloc(on_info_clicked), c_null_ptr)
     call gtk_box_append(toolbar, info_btn)
@@ -475,7 +480,7 @@ contains
     type(c_ptr), value :: button, user_data
 
     if (len_trim(global_scan_path) == 0) then
-      call sniffly_update_status("No directory to scan")
+      call sniffly_show_error("No directory to scan")
       return
     end if
 
@@ -509,21 +514,27 @@ contains
     print *, "Open in Finder button clicked!"
 
     ! Check if there's a selection
-    if (.not. has_selection()) then
-      print *, "No selection - cannot open in Finder"
-      return
+    if (has_selection()) then
+      ! Get the selected node path
+      selected_path = get_selected_node_path()
+      if (len_trim(selected_path) == 0) then
+        print *, "Invalid selection path"
+        return
+      end if
+      print *, "Opening selected item in Finder: ", trim(selected_path)
+    else
+      ! No selection - use current directory
+      if (len_trim(global_scan_path) == 0) then
+         print *, "No current directory to open"
+        call sniffly_show_error("No directory to open in Finder")
+        return
+      end if
+      selected_path = trim(global_scan_path)
+      print *, "Opening current directory in Finder: ", trim(selected_path)
     end if
 
-    ! Get the selected node path
-    selected_path = get_selected_node_path()
-
-    if (len_trim(selected_path) == 0) then
-      print *, "Invalid selection path"
-      return
-    end if
-
-    print *, "Opening in Finder: ", trim(selected_path)
     call open_in_file_manager(selected_path)
+    call sniffly_update_status("Opened in Finder: " // trim(selected_path))
   end subroutine on_open_finder_clicked
 
   ! Callback when Copy Path button is clicked
@@ -537,7 +548,7 @@ contains
     ! Check if there's a selection
     if (.not. has_selection()) then
       print *, "No selection - cannot copy path"
-      call sniffly_update_status("No selection to copy")
+      call sniffly_show_error("No selection to copy")
       return
     end if
 
@@ -546,7 +557,7 @@ contains
 
     if (len_trim(selected_path) == 0) then
       print *, "Invalid selection path"
-      call sniffly_update_status("Invalid selection path")
+      call sniffly_show_error("Invalid selection path")
       return
     end if
 
@@ -556,7 +567,7 @@ contains
     display = gdk_display_get_default()
     if (.not. c_associated(display)) then
       print *, "ERROR: Failed to get default display"
-      call sniffly_update_status("Failed to access clipboard")
+      call sniffly_show_error("Failed to access clipboard")
       return
     end if
 
@@ -564,7 +575,7 @@ contains
     clipboard = gdk_display_get_clipboard(display)
     if (.not. c_associated(clipboard)) then
       print *, "ERROR: Failed to get clipboard"
-      call sniffly_update_status("Failed to access clipboard")
+      call sniffly_show_error("Failed to access clipboard")
       return
     end if
 
@@ -576,15 +587,13 @@ contains
     print *, "Path copied successfully!"
   end subroutine on_copy_path_clicked
 
-  ! Callback when Properties/Info button is clicked
-  subroutine on_info_clicked(button, user_data) bind(c)
+  ! Helper: Build selection info string for status bar
+  function build_selection_info() result(info_text)
     use iso_fortran_env, only: int64
     use treemap_renderer, only: get_current_view_node
     use treemap_widget, only: get_selected_index
     use types, only: file_node
     use file_system, only: list_directory
-    type(c_ptr), value :: button, user_data
-    character(len=:), allocatable :: info_msg
     character(len=1024) :: info_text
     character(len=20) :: size_str
     type(file_node), pointer :: view_node
@@ -592,11 +601,7 @@ contains
     integer :: item_count, selected_idx
     character(len=256), dimension(10000) :: entries
 
-    ! Check if there's a selection
-    if (.not. has_selection()) then
-      call sniffly_update_status("No selection to show properties for")
-      return
-    end if
+    info_text = ""
 
     ! Get the selected node
     view_node => get_current_view_node()
@@ -604,23 +609,21 @@ contains
       return
     end if
 
-    ! Get the selected child index (1-based: 1 = first child, 2 = second child, etc.)
+    ! Get the selected child index (1-based)
     selected_idx = get_selected_index()
     if (selected_idx < 1 .or. selected_idx > view_node%num_children) then
-      call sniffly_update_status("Invalid selection")
       return
     end if
 
-    ! Get details from selected child (selected_idx is already 1-based)
+    ! Get details from selected child
     size_bytes = view_node%children(selected_idx)%size
 
     ! Check if this is a grouped "[N small files]" node
     if (index(view_node%children(selected_idx)%name, '[') == 1 .and. &
         index(view_node%children(selected_idx)%name, 'small files]') > 0) then
-      ! This is a grouped small files node - don't count items (name already has the count)
       item_count = -1  ! Special marker for grouped nodes
     else if (view_node%children(selected_idx)%is_directory) then
-      ! For regular directories, count entries on-demand to get accurate item count
+      ! For regular directories, count entries on-demand
       item_count = list_directory(view_node%children(selected_idx)%path, entries, 10000)
     else
       item_count = 0  ! Files don't have children
@@ -637,7 +640,7 @@ contains
       write(size_str, '(F0.2,A)') real(size_bytes)/(1024.0**3), ' GB'
     end if
 
-    ! Build info text for status bar
+    ! Build info text
     if (item_count == -1) then
       ! Grouped small files - name already contains the count
       write(info_text, '(A,A,A)') &
@@ -651,10 +654,48 @@ contains
       write(info_text, '(A,A,A,A)') &
         trim(view_node%children(selected_idx)%name), ' | ', trim(size_str), ' | File'
     end if
+  end function build_selection_info
 
-    ! Show properties in status bar
-    info_msg = trim(info_text)
-    call sniffly_update_status(info_msg)
+  ! Callback when Properties/Info button is clicked - opens macOS Get Info window
+  subroutine on_info_clicked(button, user_data) bind(c)
+    type(c_ptr), value :: button, user_data
+    character(len=512) :: selected_path
+    character(len=1024) :: applescript_cmd
+    integer :: exit_status
+
+    print *, "Info button clicked - opening macOS Get Info window"
+
+    ! Check if there's a selection
+    if (.not. has_selection()) then
+      call sniffly_show_error("No selection to show info for")
+      return
+    end if
+
+    ! Get the selected node path
+    selected_path = get_selected_node_path()
+    if (len_trim(selected_path) == 0) then
+      print *, "Invalid selection path"
+      call sniffly_show_error("Invalid selection")
+      return
+    end if
+
+    print *, "Opening Get Info for: ", trim(selected_path)
+
+    ! Build AppleScript command to open Get Info window
+    ! We escape single quotes in the path by replacing ' with '\''
+    write(applescript_cmd, '(A,A,A)') &
+      'osascript -e ''tell application "Finder" to open information window of (POSIX file "', &
+      trim(selected_path), '" as alias)'''
+
+    ! Execute the command
+    call execute_command_line(trim(applescript_cmd), exitstat=exit_status)
+
+    if (exit_status /= 0) then
+      print *, "ERROR: Failed to open Get Info window (exit status:", exit_status, ")"
+      call sniffly_show_error("Failed to open Get Info window")
+    else
+      print *, "Successfully opened Get Info window"
+    end if
   end subroutine on_info_clicked
 
   ! Helper: Update Back/Forward button states
@@ -716,10 +757,11 @@ contains
     end if
   end subroutine update_cancel_scan_button_state
 
-  ! Helper: Update selection-dependent button states
+  ! Helper: Update selection-dependent button states and display selection info
   subroutine update_selection_buttons()
     use gtk, only: gtk_widget_set_sensitive
     logical :: has_sel
+    character(len=1024) :: sel_info
 
     ! Guard against accessing widgets during shutdown
     if (app_is_shutting_down) return
@@ -730,20 +772,30 @@ contains
 
     print *, "DEBUG: update_selection_buttons() called, has_selection =", has_sel
 
-    ! Enable/disable all selection-dependent buttons
+    ! Enable/disable selection-dependent buttons
     if (has_sel) then
       print *, "DEBUG:   Enabling selection-dependent buttons"
       call gtk_widget_set_sensitive(info_btn_ptr, 1_c_int)
       call gtk_widget_set_sensitive(copy_path_btn_ptr, 1_c_int)
-      call gtk_widget_set_sensitive(open_finder_btn_ptr, 1_c_int)
       call gtk_widget_set_sensitive(delete_btn_ptr, 1_c_int)
+
+      ! Auto-display selection info in status bar
+      sel_info = build_selection_info()
+      if (len_trim(sel_info) > 0) then
+        call sniffly_update_status(trim(sel_info))
+      end if
     else
       print *, "DEBUG:   Disabling selection-dependent buttons"
       call gtk_widget_set_sensitive(info_btn_ptr, 0_c_int)
       call gtk_widget_set_sensitive(copy_path_btn_ptr, 0_c_int)
-      call gtk_widget_set_sensitive(open_finder_btn_ptr, 0_c_int)
       call gtk_widget_set_sensitive(delete_btn_ptr, 0_c_int)
+
+      ! Clear selection info from status bar when deselected
+      call sniffly_update_status("")
     end if
+
+    ! Open in Finder button is always enabled (defaults to current directory)
+    call gtk_widget_set_sensitive(open_finder_btn_ptr, 1_c_int)
   end subroutine update_selection_buttons
 
   ! Helper: Add path to navigation history
@@ -800,6 +852,121 @@ contains
     call update_history_buttons()
   end subroutine add_to_history
 
+  ! Navigate to a synthetic path (grouped small files node) by tree traversal
+  subroutine navigate_to_synthetic_path(synthetic_path)
+    use treemap_renderer, only: scan_directory
+    character(len=*), intent(in) :: synthetic_path
+    character(len=512) :: parent_path, node_name
+    integer :: last_sep, i
+
+    ! Extract parent path and node name
+    last_sep = 0
+    do i = len_trim(synthetic_path), 1, -1
+      if (synthetic_path(i:i) == '/') then
+        last_sep = i
+        exit
+      end if
+    end do
+
+    if (last_sep > 0) then
+      parent_path = synthetic_path(1:last_sep-1)
+      node_name = synthetic_path(last_sep+1:len_trim(synthetic_path))
+    else
+      print *, "ERROR: Invalid synthetic path format"
+      return
+    end if
+
+    print *, "  Parent path: ", trim(parent_path)
+    print *, "  Node name: ", trim(node_name)
+
+    ! Set up pending navigation
+    pending_synthetic_nav = .true.
+    pending_synthetic_child_name = trim(node_name)
+
+    ! Navigate to parent directory - after scan completes, breadcrumb_callback will handle navigation
+    call set_scan_path(trim(parent_path))
+    call update_path_entry(trim(parent_path))
+    call trigger_rescan(parent_path)
+    call sniffly_update_status("Navigating to grouped files...")
+  end subroutine navigate_to_synthetic_path
+
+  ! Complete pending synthetic navigation (called after scan completes)
+  subroutine complete_synthetic_navigation()
+    use treemap_renderer, only: get_current_view_node, navigate_into_node, invalidate_layout
+    use treemap_widget, only: get_widget_ptr
+    use gtk, only: gtk_widget_queue_draw
+    use types, only: file_node
+    type(file_node), pointer :: view_node
+    type(c_ptr) :: widget
+    integer :: i
+
+    if (.not. pending_synthetic_nav) return
+
+    synthetic_nav_attempts = synthetic_nav_attempts + 1
+    print *, "=== COMPLETING SYNTHETIC NAVIGATION (attempt ", synthetic_nav_attempts, ") ==="
+    print *, "  Looking for child: ", trim(pending_synthetic_child_name)
+
+    view_node => get_current_view_node()
+    if (.not. associated(view_node)) then
+      print *, "ERROR: No current view node"
+      pending_synthetic_nav = .false.
+      synthetic_nav_attempts = 0
+      return
+    end if
+
+    if (.not. allocated(view_node%children)) then
+      print *, "ERROR: Current node has no children"
+      pending_synthetic_nav = .false.
+      synthetic_nav_attempts = 0
+      return
+    end if
+
+    print *, "  Current view has ", view_node%num_children, " children"
+
+    ! If we have way too many children, grouping hasn't happened yet - wait for next callback
+    if (view_node%num_children > 100 .and. synthetic_nav_attempts < 5) then
+      print *, "  Too many children (", view_node%num_children, ") - grouping not done yet, waiting..."
+      return  ! Keep pending flag true, will retry on next callback
+    end if
+
+    ! Find child with matching name
+    do i = 1, view_node%num_children
+      if (allocated(view_node%children(i)%name)) then
+        if (trim(view_node%children(i)%name) == trim(pending_synthetic_child_name)) then
+          print *, "  Found child at index ", i, ": '", trim(view_node%children(i)%name), "'"
+          ! Navigate into the child
+          call navigate_into_node(i)
+
+          ! Update UI
+          call invalidate_layout()
+          widget = get_widget_ptr()
+          if (c_associated(widget)) then
+            call gtk_widget_queue_draw(widget)
+          end if
+
+          ! Trigger breadcrumb update
+          call breadcrumb_callback()
+
+          pending_synthetic_nav = .false.
+          synthetic_nav_attempts = 0
+          call sniffly_update_status("Navigated to grouped files")
+          return
+        end if
+      end if
+    end do
+
+    ! Give up after several attempts
+    if (synthetic_nav_attempts >= 5) then
+      print *, "ERROR: Could not find child after ", synthetic_nav_attempts, " attempts"
+      print *, "  Searched for: '", trim(pending_synthetic_child_name), "'"
+      pending_synthetic_nav = .false.
+      synthetic_nav_attempts = 0
+      call sniffly_show_error("Could not find grouped files node")
+    else
+      print *, "  Child not found yet, will retry on next callback"
+    end if
+  end subroutine complete_synthetic_navigation
+
   ! Callback when Back button is clicked
   subroutine on_back_clicked(button, user_data) bind(c)
     use progressive_scanner, only: is_scan_active
@@ -810,7 +977,7 @@ contains
 
     ! Block navigation if scan is active
     if (is_scan_active()) then
-      call sniffly_update_status("Cannot navigate: Scan in progress")
+      call sniffly_show_error("Cannot navigate: Scan in progress")
       return
     end if
 
@@ -832,13 +999,14 @@ contains
   subroutine on_forward_clicked(button, user_data) bind(c)
     use progressive_scanner, only: is_scan_active
     type(c_ptr), value :: button, user_data
+    logical :: is_synthetic
 
     print *, "=== FORWARD BUTTON CLICKED ==="
     print *, "  Before: pos=", nav_history_pos, " count=", nav_history_count
 
     ! Block navigation if scan is active
     if (is_scan_active()) then
-      call sniffly_update_status("Cannot navigate: Scan in progress")
+      call sniffly_show_error("Cannot navigate: Scan in progress")
       return
     end if
 
@@ -847,10 +1015,22 @@ contains
       global_scan_path = trim(nav_history(nav_history_pos))
       print *, "  Moving forward to pos=", nav_history_pos
       print *, "  Path: ", trim(global_scan_path)
+
       navigating_history = .true.  ! Set flag before triggering rescan
-      call set_scan_path(trim(global_scan_path))
-      call update_path_entry(trim(global_scan_path))
-      call trigger_rescan(global_scan_path)
+
+      ! Check if this is a synthetic path (grouped small files node)
+      is_synthetic = (index(global_scan_path, '[') > 0 .and. &
+                      index(global_scan_path, 'small files]') > 0)
+
+      if (is_synthetic) then
+        print *, "  Synthetic path detected - navigating by tree traversal"
+        call navigate_to_synthetic_path(global_scan_path)
+      else
+        call set_scan_path(trim(global_scan_path))
+        call update_path_entry(trim(global_scan_path))
+        call trigger_rescan(global_scan_path)
+      end if
+
       call update_history_buttons()
       call sniffly_update_status("Navigated forward to: " // trim(global_scan_path))
     end if
@@ -1171,6 +1351,33 @@ contains
     end if
   end subroutine sniffly_update_status
 
+  ! Timeout callback to clear status message (called after 5 seconds)
+  function clear_status_message(user_data) bind(c) result(continue)
+    type(c_ptr), value :: user_data
+    integer(c_int) :: continue
+
+    ! Clear the status message
+    if (.not. app_is_shutting_down .and. c_associated(status_label_ptr)) then
+      call gtk_label_set_text(status_label_ptr, ""//c_null_char)
+    end if
+
+    ! Return 0 to indicate the timeout should not repeat (one-shot)
+    continue = 0_c_int
+  end function clear_status_message
+
+  ! Show error message in status bar, auto-dismiss after 5 seconds
+  subroutine sniffly_show_error(message)
+    character(len=*), intent(in) :: message
+    integer(c_int) :: timeout_id
+
+    ! Display the error message
+    call sniffly_update_status(message)
+
+    ! Schedule message to be cleared after 5 seconds
+    ! Note: g_timeout_add_seconds_once is a one-shot timer that calls the callback once
+    timeout_id = g_timeout_add_seconds_once(5_c_int, c_funloc(clear_status_message), c_null_ptr)
+  end subroutine sniffly_show_error
+
   ! Update status bar with file count and size statistics
   subroutine sniffly_update_status_bar_stats()
     use types, only: file_node
@@ -1485,7 +1692,7 @@ contains
     if (len_trim(global_scan_path) > 0) then
       call trigger_rescan(global_scan_path)
     else
-      call sniffly_update_status("No directory to scan")
+      call sniffly_show_error("No directory to scan")
     end if
   end subroutine refresh_callback_wrapper
 
@@ -1505,6 +1712,12 @@ contains
     ! Re-enable back/forward buttons if there's history
     print *, "=== RE-ENABLING NAVIGATION BUTTONS ==="
     call update_history_buttons()
+
+    ! Complete any pending synthetic navigation
+    if (pending_synthetic_nav) then
+      print *, "=== PENDING SYNTHETIC NAV - COMPLETING ==="
+      call complete_synthetic_navigation()
+    end if
   end subroutine scan_complete_callback_wrapper
 
   ! Trigger a rescan of the given directory (for UI buttons)
