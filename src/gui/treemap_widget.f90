@@ -18,8 +18,8 @@ module treemap_widget
 
   public :: create_treemap_widget, set_scan_path, get_widget_ptr, register_navigation_callback, &
             register_key_handler, register_quit_callback, register_delete_callback, &
-            register_refresh_callback, mark_initial_scan_complete, get_selected_node_path, &
-            has_selection, get_selected_index, clear_selection
+            register_refresh_callback, register_selection_callback, mark_initial_scan_complete, &
+            get_selected_node_path, has_selection, get_selected_index, clear_selection
 
   ! Callback interface for navigation events
   abstract interface
@@ -43,6 +43,12 @@ module treemap_widget
   abstract interface
     subroutine refresh_callback()
     end subroutine refresh_callback
+  end interface
+
+  ! Callback interface for selection change events
+  abstract interface
+    subroutine selection_callback()
+    end subroutine selection_callback
   end interface
 
   ! GDK Key constants
@@ -92,6 +98,9 @@ module treemap_widget
 
   ! Force refresh callback (called when user wants to force refresh with cache clear)
   procedure(refresh_callback), pointer, save :: refresh_cb => null()
+
+  ! Selection callback (called when selection changes)
+  procedure(selection_callback), pointer, save :: selection_cb => null()
 
 contains
 
@@ -199,6 +208,13 @@ contains
     print *, "Force refresh callback registered"
   end subroutine register_refresh_callback
 
+  ! Register a callback to be called when selection changes
+  subroutine register_selection_callback(callback)
+    procedure(selection_callback) :: callback
+    selection_cb => callback
+    print *, "Selection callback registered"
+  end subroutine register_selection_callback
+
   ! Mark that the initial scan has completed
   subroutine mark_initial_scan_complete()
     initial_scan_complete = .true.
@@ -246,7 +262,7 @@ contains
     if (button == 3_c_int) then
       if (clicked_index > 0) then
         ! Select the node and show context menu
-        selected_index = clicked_index
+        call set_selection(clicked_index)
         print *, "Right-click on node: ", selected_index
         call show_context_menu(x, y)
       end if
@@ -264,7 +280,7 @@ contains
         ! Double-click: navigate into the directory
         print *, "Double-click detected! Navigating into node: ", clicked_index
         call navigate_into_node(clicked_index)
-        selected_index = 0  ! Clear selection after navigation
+        call set_selection(0)  ! Clear selection after navigation
 
         ! Call navigation callback to update breadcrumbs
         if (associated(nav_callback)) then
@@ -274,17 +290,17 @@ contains
         ! Single click: toggle selection
         if (selected_index == clicked_index) then
           ! Clicking same item again - deselect it
-          selected_index = 0
+          call set_selection(0)
           print *, "Deselected by clicking same item"
         else
           ! Clicking different item - select it
-          selected_index = clicked_index
+          call set_selection(clicked_index)
           print *, "Selected node index: ", selected_index
         end if
       end if
     else
       ! Click outside any node - deselect
-      selected_index = 0
+      call set_selection(0)
       print *, "Deselected by clicking empty space"
     end if
 
@@ -527,7 +543,7 @@ contains
 
       ! Select the hovered item
       if (hovered_node_index > 0) then
-        selected_index = hovered_node_index
+        call set_selection(hovered_node_index)
         print *, "Space pressed - selected node: ", selected_index
       else
         print *, "DEBUG: No node to select (hovered_node_index = 0)"
@@ -561,7 +577,7 @@ contains
       end if
 
       ! Clear selection after navigation
-      selected_index = 0
+      call set_selection(0)
       keyboard_hover_index = 0
 
       ! Call navigation callback
@@ -725,7 +741,21 @@ contains
   subroutine clear_selection()
     selected_index = 0
     print *, "Selection cleared"
+    ! Notify callback that selection changed
+    if (associated(selection_cb)) then
+      call selection_cb()
+    end if
   end subroutine clear_selection
+
+  ! Helper: Set selection and notify callback
+  subroutine set_selection(new_index)
+    integer, intent(in) :: new_index
+    selected_index = new_index
+    ! Notify callback that selection changed
+    if (associated(selection_cb)) then
+      call selection_cb()
+    end if
+  end subroutine set_selection
 
   ! Context menu callbacks
   subroutine on_context_navigate(button, popover) bind(c)
