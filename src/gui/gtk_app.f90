@@ -583,7 +583,7 @@ contains
         selected_path = c_path(1:path_len)
         print *, "Selected directory: ", trim(selected_path)
 
-        ! Update tab scan path (but don't scan yet)
+        ! Update tab scan path
         ! Remove trailing slash if present (C code doesn't like it)
         if (len_trim(selected_path) > 1 .and. &
             selected_path(len_trim(selected_path):len_trim(selected_path)) == '/') then
@@ -595,7 +595,9 @@ contains
         call set_scan_path(trim(tab%scan_path))
         call update_path_entry(trim(tab%scan_path))
 
-        print *, "Path updated. Click Scan button to scan: ", trim(tab%scan_path)
+        ! Auto-start scan immediately after directory selection
+        call sniffly_update_status("Scanning...")
+        call trigger_rescan(tab%scan_path)
       end if
     else
       print *, "Directory selection cancelled"
@@ -2161,11 +2163,9 @@ contains
       normalized_path = trim(path)
     end if
 
-    ! Process pending GTK events before starting scan
+    ! Process pending GTK events once before starting scan (minimal delay)
     context = g_main_context_default()
-    do i = 1, 10
-      do while (g_main_context_iteration(context, 0_c_int) /= 0_c_int)
-      end do
+    do while (g_main_context_iteration(context, 0_c_int) /= 0_c_int)
     end do
 
     print *, "=== ABOUT TO CALL scan_directory ==="
@@ -2177,10 +2177,8 @@ contains
     call update_cancel_scan_button_state()
     call update_history_buttons()
 
-    ! Process events after scan to update UI
-    do i = 1, 10
-      do while (g_main_context_iteration(context, 0_c_int) /= 0_c_int)
-      end do
+    ! Process events once after scan to update UI
+    do while (g_main_context_iteration(context, 0_c_int) /= 0_c_int)
     end do
 
     ! Invalidate layout to force recalculation
