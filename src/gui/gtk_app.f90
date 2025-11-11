@@ -1260,13 +1260,14 @@ contains
     type(file_node), pointer :: current_view
     character(len=512) :: fwd_path, prev_breadcrumb_path
     integer :: i, matched_pos, current_len
-    logical :: was_navigating_history
+    logical :: was_navigating_history, is_breadcrumb_lookahead
 
     print *, "=== BREADCRUMB_CALLBACK ==="
     print *, "  navigating_history flag at entry: ", navigating_history
 
     ! Initialize variables
     fwd_path = ""
+    is_breadcrumb_lookahead = .false.
 
     ! Save flag state
     was_navigating_history = navigating_history
@@ -1288,6 +1289,7 @@ contains
           if (prev_breadcrumb_path(1:current_len) == global_scan_path(1:current_len)) then
             ! We navigated to a parent directory via breadcrumb
             fwd_path = trim(prev_breadcrumb_path)
+            is_breadcrumb_lookahead = .true.
             print *, "  Breadcrumb-based lookahead detected: ", trim(fwd_path)
             ! Clear the saved path
             call clear_previous_breadcrumb_path()
@@ -1342,19 +1344,20 @@ contains
 
     call sniffly_update_status_bar_stats()
 
-    ! Add to history ONLY if this is a new navigation (not back/forward/breadcrumb)
-    ! Check if we have a forward path - if so, we're in history navigation mode
-    if (.not. navigating_history .and. len_trim(fwd_path) == 0) then
-      ! No forward path AND not navigating history = truly new navigation
+    ! Add to history if this is a new navigation
+    ! Skip only if: (1) using back/forward buttons OR (2) history-based forward path exists
+    ! BUT: breadcrumb-based lookahead IS a new navigation and should be added!
+    if (.not. navigating_history .and. (len_trim(fwd_path) == 0 .or. is_breadcrumb_lookahead)) then
+      ! New navigation (including breadcrumb navigation with lookahead)
       if (len_trim(global_scan_path) > 0) then
-        print *, "  Calling add_to_history (new navigation)..."
+        print *, "  Calling add_to_history (new navigation, breadcrumb_lookahead=", is_breadcrumb_lookahead, ")"
         call add_to_history(global_scan_path)
       end if
     else
       if (navigating_history) then
         print *, "  Skipping add_to_history (history navigation mode)"
       else
-        print *, "  Skipping add_to_history (forward context exists)"
+        print *, "  Skipping add_to_history (history-based forward context exists)"
       end if
     end if
 
