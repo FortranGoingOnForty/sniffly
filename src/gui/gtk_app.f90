@@ -17,7 +17,8 @@ module gtk_app
                  gtk_button_new, gtk_button_set_icon_name, gtk_widget_set_tooltip_text, &
                  gtk_entry_new, gtk_entry_buffer_set_text, gtk_entry_get_buffer, &
                  gtk_editable_set_editable, gtk_editable_get_text, &
-                 gtk_entry_set_placeholder_text
+                 gtk_entry_set_placeholder_text, gtk_widget_add_css_class, &
+                 gtk_widget_remove_css_class
   use gdk, only: gdk_display_get_default, gdk_display_get_clipboard, gdk_clipboard_set_text
   use g, only: g_application_run, g_idle_add
   use treemap_widget, only: create_treemap_widget, set_scan_path, register_navigation_callback, &
@@ -72,6 +73,7 @@ module gtk_app
   ! Button pointers for enabling/disabling
   type(c_ptr), save :: back_btn_ptr = c_null_ptr
   type(c_ptr), save :: forward_btn_ptr = c_null_ptr
+  type(c_ptr), save :: cancel_scan_btn_ptr = c_null_ptr
 
 contains
 
@@ -123,6 +125,7 @@ contains
     path_entry_ptr = c_null_ptr
     back_btn_ptr = c_null_ptr
     forward_btn_ptr = c_null_ptr
+    cancel_scan_btn_ptr = c_null_ptr
     breadcrumb_buttons = c_null_ptr
   end subroutine sniffly_app_quit
 
@@ -165,7 +168,7 @@ contains
   ! Callback when application activates (startup)
   subroutine on_activate(app, user_data) bind(c)
     type(c_ptr), value :: app, user_data
-    type(c_ptr) :: drawing_area, main_box, toolbar, open_dir_btn, scan_btn, back_btn, forward_btn, up_btn, open_finder_btn, copy_path_btn, info_btn, toggle_dotfiles_btn, toggle_ext_btn, toggle_render_btn, delete_btn, status_bar, breadcrumb_bar
+    type(c_ptr) :: drawing_area, main_box, toolbar, open_dir_btn, scan_btn, cancel_scan_btn, back_btn, forward_btn, up_btn, open_finder_btn, copy_path_btn, info_btn, toggle_dotfiles_btn, toggle_ext_btn, toggle_render_btn, delete_btn, status_bar, breadcrumb_bar
     character(len=512) :: scan_path
     integer(c_int) :: idle_id
 
@@ -227,6 +230,15 @@ contains
                            c_funloc(on_scan_clicked), c_null_ptr)
     call gtk_box_append(toolbar, scan_btn)
 
+    ! Create Cancel Scan button with X icon
+    cancel_scan_btn = gtk_button_new()
+    call gtk_button_set_icon_name(cancel_scan_btn, "window-close"//c_null_char)
+    call gtk_widget_set_tooltip_text(cancel_scan_btn, "Cancel Scan"//c_null_char)
+    call g_signal_connect(cancel_scan_btn, "clicked"//c_null_char, &
+                           c_funloc(on_cancel_scan_clicked), c_null_ptr)
+    call gtk_box_append(toolbar, cancel_scan_btn)
+    cancel_scan_btn_ptr = cancel_scan_btn  ! Store for enabling/disabling
+
     ! Create Back button (navigate to previous directory in history)
     back_btn = gtk_button_new()
     call gtk_button_set_icon_name(back_btn, "go-previous"//c_null_char)
@@ -255,6 +267,9 @@ contains
 
     ! Initialize Back/Forward button states (disabled until history exists)
     call update_history_buttons()
+
+    ! Initialize Cancel Scan button state (disabled and grey until scan starts)
+    call update_cancel_scan_button_state()
 
     ! Create progress bar (always visible but starts at 0%)
     ! Place it in toolbar, expanded to fill remaining space (pushes to right)
@@ -372,8 +387,8 @@ contains
     call register_progress_callback(sniffly_show_progress, sniffly_hide_progress, &
                                       sniffly_update_progress)
 
-    ! Register scan completion callback
-    call register_scan_completion_callback(mark_initial_scan_complete)
+    ! Register scan completion callback (wrapped to update button state)
+    call register_scan_completion_callback(scan_complete_callback_wrapper)
     print *, "Scan completion callback registered"
 
     ! Add drawing area to main box
@@ -455,6 +470,22 @@ contains
     call sniffly_update_status("Rescanning...")
     call trigger_rescan(global_scan_path)
   end subroutine on_scan_clicked
+
+  ! Callback when Cancel Scan button is clicked
+  subroutine on_cancel_scan_clicked(button, user_data) bind(c)
+    use progressive_scanner, only: stop_progressive_scan, is_scan_active
+    type(c_ptr), value :: button, user_data
+
+    print *, "Cancel scan button clicked!"
+
+    if (is_scan_active()) then
+      call sniffly_update_status("Cancelling scan...")
+      call stop_progressive_scan()
+      ! Update button state (will be disabled after scan stops)
+      call update_cancel_scan_button_state()
+      call sniffly_update_status("Scan cancelled")
+    end if
+  end subroutine on_cancel_scan_clicked
 
   ! Callback when Open in Finder button is clicked
   subroutine on_open_finder_clicked(button, user_data) bind(c)
@@ -615,6 +646,30 @@ contains
       call gtk_widget_set_sensitive(forward_btn_ptr, 0_c_int)
     end if
   end subroutine update_history_buttons
+
+  ! Helper: Update Cancel Scan button state based on scan status
+  subroutine update_cancel_scan_button_state()
+    use progressive_scanner, only: is_scan_active
+    use gtk, only: gtk_widget_set_sensitive
+
+    ! Guard against accessing widgets during shutdown
+    if (app_is_shutting_down) return
+    if (.not. c_associated(cancel_scan_btn_ptr)) return
+
+    print *, "DEBUG: Updating cancel button state, scan active =", is_scan_active()
+
+    if (is_scan_active()) then
+      ! Scan is active - enable button and make it red
+      print *, "DEBUG: Enabling cancel button (making it red)"
+      call gtk_widget_add_css_class(cancel_scan_btn_ptr, "destructive-action"//c_null_char)
+      call gtk_widget_set_sensitive(cancel_scan_btn_ptr, 1_c_int)
+    else
+      ! No scan active - remove red styling first, then disable button
+      print *, "DEBUG: Disabling cancel button (making it grey)"
+      call gtk_widget_remove_css_class(cancel_scan_btn_ptr, "destructive-action"//c_null_char)
+      call gtk_widget_set_sensitive(cancel_scan_btn_ptr, 0_c_int)
+    end if
+  end subroutine update_cancel_scan_button_state
 
   ! Helper: Add path to navigation history
   subroutine add_to_history(path)
@@ -1236,6 +1291,8 @@ contains
       call gtk_progress_bar_set_fraction(progress_bar_ptr, 0.0_c_double)
       call gtk_progress_bar_set_text(progress_bar_ptr, "0%"//c_null_char)
     end if
+    ! Update cancel button when progress bar is shown (scan starting)
+    call update_cancel_scan_button_state()
   end subroutine sniffly_show_progress
 
   ! Hide progress bar (now just resets to 0%)
@@ -1246,6 +1303,8 @@ contains
       call gtk_progress_bar_set_fraction(progress_bar_ptr, 0.0_c_double)
       call gtk_progress_bar_set_text(progress_bar_ptr, ""//c_null_char)
     end if
+    ! Update cancel button when progress bar is hidden (scan likely stopped)
+    call update_cancel_scan_button_state()
   end subroutine sniffly_hide_progress
 
   ! Update progress bar and status text
@@ -1344,6 +1403,20 @@ contains
     end if
   end subroutine refresh_callback_wrapper
 
+  ! Callback wrapper for scan completion
+  subroutine scan_complete_callback_wrapper()
+    use treemap_widget, only: mark_initial_scan_complete
+
+    print *, "=== SCAN COMPLETE CALLBACK FIRED ==="
+
+    ! Call the original completion callback
+    call mark_initial_scan_complete()
+
+    ! Update cancel button (scan is done, should be disabled and grey)
+    print *, "=== UPDATING CANCEL BUTTON FROM COMPLETION CALLBACK ==="
+    call update_cancel_scan_button_state()
+  end subroutine scan_complete_callback_wrapper
+
   ! Trigger a rescan of the given directory (for UI buttons)
   subroutine trigger_rescan(path)
     use gtk, only: gtk_widget_queue_draw
@@ -1379,6 +1452,9 @@ contains
     ! Scan the directory (this will show progress via callbacks)
     call scan_directory(normalized_path)
     print *, "=== RETURNED FROM scan_directory ==="
+
+    ! Update cancel button state (scan just started, should be enabled and red)
+    call update_cancel_scan_button_state()
 
     ! Process events after scan to update UI
     do i = 1, 10
