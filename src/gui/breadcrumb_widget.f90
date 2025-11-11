@@ -452,6 +452,7 @@ contains
   ! Click callback - handle navigation
   subroutine on_breadcrumb_click(gesture, n_press, x, y, user_data) bind(c)
     use treemap_renderer, only: get_current_view_node, scan_directory
+    use progressive_scanner, only: is_scan_active
     use types, only: file_node
     type(c_ptr), value :: gesture, user_data
     integer(c_int), value :: n_press
@@ -460,6 +461,12 @@ contains
     type(file_node), pointer :: current_view
     character(len=:), allocatable :: target_path
     character(len=512) :: current_path
+
+    ! Block navigation if scan is active (safety check)
+    if (is_scan_active()) then
+      print *, "Breadcrumb click blocked: Scan in progress"
+      return
+    end if
 
     ! Find which segment was clicked
     clicked_segment = find_segment_at_position(x, y)
