@@ -7,7 +7,7 @@ module treemap_widget
                  gtk_widget_add_controller, g_signal_connect, &
                  gtk_gesture_click_new, gtk_widget_queue_draw, gtk_gesture_single_get_current_button, &
                  gtk_event_controller_key_new, gtk_widget_set_focusable, &
-                 gtk_widget_set_has_tooltip, gtk_tooltip_set_text, &
+                 gtk_widget_set_has_tooltip, gtk_tooltip_set_text, gtk_tooltip_set_tip_area, &
                  gtk_popover_new, gtk_popover_set_child, gtk_popover_popup, gtk_popover_popdown, &
                  gtk_popover_set_has_arrow, gtk_widget_set_parent, gtk_box_new, &
                  gtk_button_new_with_label, gtk_box_append, gtk_label_new, GTK_ORIENTATION_VERTICAL
@@ -617,6 +617,12 @@ contains
     real(c_double) :: dx, dy
     real :: size_mb, size_gb
 
+    ! GdkRectangle structure for tooltip positioning
+    type, bind(c) :: gdk_rectangle
+      integer(c_int) :: x, y, width, height
+    end type gdk_rectangle
+    type(gdk_rectangle), target :: tip_rect
+
     show_tooltip = 0_c_int  ! Default: don't show tooltip
 
     ! Convert coordinates to double for find_node_at_position
@@ -632,6 +638,14 @@ contains
       if (.not. associated(current_view)) return
       if (.not. allocated(current_view%children)) return
       if (hovered_index > current_view%num_children) return
+
+      ! Set the tooltip tip area to the hovered node's bounds
+      ! This tells GTK where to position the tooltip
+      tip_rect%x = current_view%children(hovered_index)%bounds%x
+      tip_rect%y = current_view%children(hovered_index)%bounds%y
+      tip_rect%width = current_view%children(hovered_index)%bounds%width
+      tip_rect%height = current_view%children(hovered_index)%bounds%height
+      call gtk_tooltip_set_tip_area(tooltip, c_loc(tip_rect))
 
       ! Format the size nicely
       if (current_view%children(hovered_index)%size < 1024_int64) then

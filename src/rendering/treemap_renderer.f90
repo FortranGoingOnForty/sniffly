@@ -12,7 +12,7 @@ module treemap_renderer
   use cairo, only: cairo_set_source_rgb, cairo_rectangle, cairo_fill, &
                    cairo_stroke, cairo_set_line_width, cairo_select_font_face, &
                    cairo_set_font_size, cairo_move_to, cairo_line_to, cairo_show_text, &
-                   cairo_set_source_rgba
+                   cairo_set_source_rgba, cairo_text_extents
   use g, only: g_main_context_default, g_main_context_iteration
   use gtk, only: gtk_widget_queue_draw
   use iso_fortran_env, only: int64
@@ -1708,15 +1708,126 @@ contains
     end if
   end subroutine toggle_render_mode
 
+  ! Wrap text to fit within a given width, returning lines
+  subroutine wrap_text(cr, text, max_width, lines, line_count, max_lines)
+    type(c_ptr), intent(in) :: cr
+    character(len=*), intent(in) :: text
+    real(c_double), intent(in) :: max_width
+    character(len=256), dimension(:), intent(out) :: lines
+    integer, intent(out) :: line_count
+    integer, intent(in) :: max_lines
+
+    ! Cairo text extents structure
+    type, bind(c) :: cairo_text_extents_t
+      real(c_double) :: x_bearing
+      real(c_double) :: y_bearing
+      real(c_double) :: width
+      real(c_double) :: height
+      real(c_double) :: x_advance
+      real(c_double) :: y_advance
+    end type cairo_text_extents_t
+
+    type(cairo_text_extents_t), target :: extents
+    character(len=256) :: current_line, test_line, word
+    integer :: text_len, i, word_start, word_len
+    logical :: in_word
+
+    line_count = 0
+    current_line = ""
+    word = ""
+    word_start = 1
+    in_word = .false.
+    text_len = len_trim(text)
+
+    ! If text is empty, return
+    if (text_len == 0) return
+
+    ! Check if full text fits
+    call cairo_text_extents(cr, trim(text)//c_null_char, c_loc(extents))
+    if (extents%width <= max_width) then
+      line_count = 1
+      lines(1) = trim(text)
+      return
+    end if
+
+    ! Split text into words and wrap
+    i = 1
+    do while (i <= text_len .and. line_count < max_lines)
+      ! Get current character
+      if (text(i:i) == ' ' .or. i == text_len) then
+        ! End of word
+        if (i == text_len .and. text(i:i) /= ' ') then
+          word_len = i - word_start + 1
+        else
+          word_len = i - word_start
+        end if
+
+        if (word_len > 0) then
+          word = text(word_start:word_start + word_len - 1)
+
+          ! Try adding word to current line
+          if (len_trim(current_line) == 0) then
+            test_line = trim(word)
+          else
+            test_line = trim(current_line) // " " // trim(word)
+          end if
+
+          ! Measure the test line
+          call cairo_text_extents(cr, trim(test_line)//c_null_char, c_loc(extents))
+
+          if (extents%width <= max_width) then
+            ! Word fits, add it to current line
+            current_line = trim(test_line)
+          else
+            ! Word doesn't fit
+            if (len_trim(current_line) > 0) then
+              ! Save current line and start new one with this word
+              line_count = line_count + 1
+              lines(line_count) = trim(current_line)
+              current_line = trim(word)
+            else
+              ! Word is too long for a single line, truncate it
+              current_line = trim(word)
+              ! Truncate word to fit
+              do while (extents%width > max_width .and. len_trim(current_line) > 3)
+                current_line = current_line(1:len_trim(current_line)-1)
+                call cairo_text_extents(cr, trim(current_line)//"..."//c_null_char, c_loc(extents))
+              end do
+              current_line = trim(current_line) // "..."
+              line_count = line_count + 1
+              lines(line_count) = trim(current_line)
+              current_line = ""
+            end if
+          end if
+        end if
+
+        word_start = i + 1
+      end if
+      i = i + 1
+    end do
+
+    ! Add remaining text as last line
+    if (len_trim(current_line) > 0 .and. line_count < max_lines) then
+      line_count = line_count + 1
+      lines(line_count) = trim(current_line)
+    end if
+
+    ! If we hit max_lines, add ellipsis to last line
+    if (line_count == max_lines .and. i < text_len) then
+      lines(line_count) = trim(lines(line_count)) // "..."
+    end if
+  end subroutine wrap_text
+
   ! Render text label for a node
   subroutine render_label(cr, node, x, y, w, h)
     use iso_fortran_env, only: int64
     type(c_ptr), intent(in) :: cr
     type(file_node), intent(in) :: node
     real(c_double), intent(in) :: x, y, w, h
-    real(c_double) :: font_size, text_x, text_y, size_font
-    integer :: min_width, min_height
+    real(c_double) :: font_size, text_x, text_y, size_font, max_text_width, bg_height
+    integer :: min_width, min_height, max_name_lines, i, line_count
     character(len=256) :: name_copy
+    character(len=256), dimension(5) :: wrapped_lines
     character(len=20) :: size_text
 
     ! Minimum rectangle size for text (pixels)
@@ -1746,33 +1857,55 @@ contains
     call cairo_select_font_face(cr, "Sans"//c_null_char, 0_c_int, 0_c_int)
     call cairo_set_font_size(cr, font_size)
 
+    ! Calculate maximum text width (box width minus padding)
+    max_text_width = w - 8.0d0
+
+    ! Determine how many lines we can fit for the name
+    if (h > 60) then
+      max_name_lines = 3  ! Tall box: allow 3 lines for name + size line
+    else if (h > 40) then
+      max_name_lines = 2  ! Medium box: allow 2 lines for name + size line
+    else
+      max_name_lines = 1  ! Short box: only 1 line for name
+    end if
+
+    ! Wrap text to fit width
+    call wrap_text(cr, name_copy, max_text_width, wrapped_lines, line_count, max_name_lines)
+
     ! Position text (top-left with small padding)
     text_x = x + 4.0d0
     text_y = y + font_size + 2.0d0
 
+    ! Calculate background height based on number of lines
+    if (h > 40 .and. line_count > 0) then
+      ! Account for wrapped name lines + size line
+      bg_height = font_size * real(line_count + 1, c_double) + 6.0d0
+    else if (line_count > 0) then
+      ! Just name lines, no size
+      bg_height = font_size * real(line_count, c_double) + 4.0d0
+    else
+      bg_height = font_size + 6.0d0
+    end if
+
     ! Draw semi-transparent dark background behind text for contrast
     call cairo_set_source_rgba(cr, 0.0d0, 0.0d0, 0.0d0, 0.7d0)  ! Black with 70% opacity
-    if (h > 40) then
-      ! Taller background for two lines
-      call cairo_rectangle(cr, x + 2.0d0, y + 2.0d0, w - 4.0d0, font_size * 2.5d0 + 6.0d0)
-    else
-      ! Single line background
-      call cairo_rectangle(cr, x + 2.0d0, y + 2.0d0, w - 4.0d0, font_size + 6.0d0)
-    end if
+    call cairo_rectangle(cr, x + 2.0d0, y + 2.0d0, w - 4.0d0, bg_height)
     call cairo_fill(cr)
 
-    ! Draw name with white color for visibility
+    ! Draw each line of wrapped text
     call cairo_set_source_rgb(cr, 1.0d0, 1.0d0, 1.0d0)
-    call cairo_move_to(cr, text_x, text_y)
-    call cairo_show_text(cr, trim(name_copy)//c_null_char)
+    do i = 1, line_count
+      call cairo_move_to(cr, text_x, text_y)
+      call cairo_show_text(cr, trim(wrapped_lines(i))//c_null_char)
+      text_y = text_y + font_size + 2.0d0
+    end do
 
-    ! Draw size label on second line if rectangle is tall enough
-    if (h > 40) then
+    ! Draw size label on next line if rectangle is tall enough
+    if (h > 40 .and. line_count > 0) then
       size_text = format_size(node%size)
       size_font = max(font_size * 0.8d0, 8.0d0)  ! Slightly smaller font for size
 
       call cairo_set_font_size(cr, size_font)
-      text_y = text_y + size_font + 2.0d0  ! Move down for second line
 
       ! Draw size in light gray/white
       call cairo_set_source_rgb(cr, 0.9d0, 0.9d0, 0.9d0)
