@@ -460,10 +460,18 @@ contains
   ! NOTE: Uses system command for file picking until GTK4 file dialog bindings are available
   subroutine on_open_dir_clicked(button, user_data) bind(c)
     type(c_ptr), value :: button, user_data
+    type(tab_state), pointer :: tab
     character(len=1024) :: selected_path
     integer :: status
 
     print *, "Open Directory button clicked!"
+
+    ! Get active tab
+    tab => get_active_tab()
+    if (.not. associated(tab)) then
+      print *, "ERROR: No active tab in on_open_dir_clicked"
+      return
+    end if
 
     ! Call helper to show native file picker
     call show_native_directory_picker(selected_path, status)
@@ -471,21 +479,21 @@ contains
     if (status == 0 .and. len_trim(selected_path) > 0) then
       print *, "Selected directory: ", trim(selected_path)
 
-      ! Update global scan path (but don't scan yet)
+      ! Update tab scan path (but don't scan yet)
       ! Remove trailing slash if present (C code doesn't like it)
       if (len_trim(selected_path) > 1 .and. selected_path(len_trim(selected_path):len_trim(selected_path)) == '/') then
-        global_scan_path = trim(selected_path(1:len_trim(selected_path)-1))
+        tab%scan_path = trim(selected_path(1:len_trim(selected_path)-1))
         print *, "DEBUG: Removed trailing slash from path"
       else
-        global_scan_path = trim(selected_path)
+        tab%scan_path = trim(selected_path)
       end if
-      print *, "DEBUG: Set global_scan_path to: '", trim(global_scan_path), "'"
-      call set_scan_path(trim(global_scan_path))
+      print *, "DEBUG: Set tab scan_path to: '", trim(tab%scan_path), "'"
+      call set_scan_path(trim(tab%scan_path))
 
       ! Update path display entry
-      call update_path_entry(trim(global_scan_path))
+      call update_path_entry(trim(tab%scan_path))
 
-      print *, "Path updated. Click Scan button to scan: ", trim(global_scan_path)
+      print *, "Path updated. Click Scan button to scan: ", trim(tab%scan_path)
     else
       print *, "Directory selection cancelled or failed"
     end if
@@ -494,15 +502,23 @@ contains
   ! Callback when Scan button is clicked
   subroutine on_scan_clicked(button, user_data) bind(c)
     type(c_ptr), value :: button, user_data
+    type(tab_state), pointer :: tab
 
-    if (len_trim(global_scan_path) == 0) then
+    ! Get active tab
+    tab => get_active_tab()
+    if (.not. associated(tab)) then
+      print *, "ERROR: No active tab in on_scan_clicked"
+      return
+    end if
+
+    if (len_trim(tab%scan_path) == 0) then
       call sniffly_show_error("No directory to scan")
       return
     end if
 
     ! Trigger a rescan of the current path (uses cache for speed)
     call sniffly_update_status("Rescanning...")
-    call trigger_rescan(global_scan_path)
+    call trigger_rescan(tab%scan_path)
   end subroutine on_scan_clicked
 
   ! Callback when Cancel Scan button is clicked
@@ -525,6 +541,7 @@ contains
   ! Callback when Open in Finder button is clicked
   subroutine on_open_finder_clicked(button, user_data) bind(c)
     type(c_ptr), value :: button, user_data
+    type(tab_state), pointer :: tab
     character(len=:), allocatable :: selected_path
 
     print *, "Open in Finder button clicked!"
@@ -540,12 +557,19 @@ contains
       print *, "Opening selected item in Finder: ", trim(selected_path)
     else
       ! No selection - use current directory
-      if (len_trim(global_scan_path) == 0) then
+      ! Get active tab
+      tab => get_active_tab()
+      if (.not. associated(tab)) then
+        print *, "ERROR: No active tab in on_open_finder_clicked"
+        return
+      end if
+
+      if (len_trim(tab%scan_path) == 0) then
          print *, "No current directory to open"
         call sniffly_show_error("No directory to open in Finder")
         return
       end if
-      selected_path = trim(global_scan_path)
+      selected_path = trim(tab%scan_path)
       print *, "Opening current directory in Finder: ", trim(selected_path)
     end if
 
