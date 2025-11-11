@@ -586,6 +586,7 @@ contains
     use treemap_renderer, only: get_current_view_node
     use treemap_widget, only: get_selected_index
     use types, only: file_node
+    use file_system, only: list_directory
     type(c_ptr), value :: button, user_data
     character(len=:), allocatable :: info_msg
     character(len=1024) :: info_text
@@ -593,6 +594,7 @@ contains
     type(file_node), pointer :: view_node
     integer(int64) :: size_bytes
     integer :: item_count, selected_idx
+    character(len=256), dimension(10000) :: entries
 
     ! Check if there's a selection
     if (.not. has_selection()) then
@@ -615,7 +617,18 @@ contains
 
     ! Get details from selected child (selected_idx is already 1-based)
     size_bytes = view_node%children(selected_idx)%size
-    item_count = view_node%children(selected_idx)%num_children
+
+    ! Check if this is a grouped "[N small files]" node
+    if (index(view_node%children(selected_idx)%name, '[') == 1 .and. &
+        index(view_node%children(selected_idx)%name, 'small files]') > 0) then
+      ! This is a grouped small files node - don't count items (name already has the count)
+      item_count = -1  ! Special marker for grouped nodes
+    else if (view_node%children(selected_idx)%is_directory) then
+      ! For regular directories, count entries on-demand to get accurate item count
+      item_count = list_directory(view_node%children(selected_idx)%path, entries, 10000)
+    else
+      item_count = 0  ! Files don't have children
+    end if
 
     ! Format size
     if (size_bytes < 1024_int64) then
@@ -629,10 +642,16 @@ contains
     end if
 
     ! Build info text for status bar
-    if (view_node%children(selected_idx)%is_directory) then
+    if (item_count == -1) then
+      ! Grouped small files - name already contains the count
+      write(info_text, '(A,A,A)') &
+        trim(view_node%children(selected_idx)%name), ' | ', trim(size_str)
+    else if (view_node%children(selected_idx)%is_directory) then
+      ! Regular directory
       write(info_text, '(A,A,A,A,I0,A)') &
         trim(view_node%children(selected_idx)%name), ' | ', trim(size_str), ' | ', item_count, ' items'
     else
+      ! Regular file
       write(info_text, '(A,A,A,A)') &
         trim(view_node%children(selected_idx)%name), ' | ', trim(size_str), ' | File'
     end if
