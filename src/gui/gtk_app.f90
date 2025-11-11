@@ -937,6 +937,10 @@ contains
 
     print *, "  Active tab index: ", active_tab_index
     print *, "  Tab has_data: ", tab%has_data
+    print *, "  Tab scan_path: ", trim(tab%scan_path)
+
+    ! Sync treemap widget's scan path with active tab's scan path
+    call set_scan_path(trim(tab%scan_path))
 
     ! Sync renderer state with active tab (CRITICAL for correct rendering)
     call set_renderer_state_from_tab(tab%root_node, tab%current_view_node, tab%has_data)
@@ -949,6 +953,12 @@ contains
       if (c_associated(open_dir_btn_ptr)) then
         call gtk_widget_add_css_class(open_dir_btn_ptr, "suggested-action"//c_null_char)
       end if
+
+      ! Clear breadcrumb display
+      call update_breadcrumb_cache("")
+
+      ! Clear path entry
+      call update_path_entry("")
 
       ! Update status bar to guide user
       call sniffly_update_status("No directory selected - click the folder icon to choose a directory")
