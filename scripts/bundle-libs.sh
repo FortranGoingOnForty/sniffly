@@ -91,11 +91,16 @@ dylibbundler -of -b \
     -s /opt/homebrew/opt/zstd/lib 2>&1 || echo "  (dylibbundler completed with warnings - this is expected)"
 
 echo ""
-echo "Step 2.5: Manually fixing GFortran library references..."
-# dylibbundler fails to fully fix libgfortran due to header limits, so we fix remaining references manually
+echo "Step 2.5: Manually fixing GFortran and GTK-Fortran library references..."
+# dylibbundler sometimes misses @rpath references, so we fix them manually
+
 # Fix binary's reference to libgfortran
 install_name_tool -change /opt/homebrew/opt/gcc/lib/gcc/current/libgfortran.5.dylib @executable_path/../Frameworks/libgfortran.5.dylib "$MACOS_BIN" 2>/dev/null || true
 install_name_tool -change /usr/local/lib/gcc/current/libgfortran.5.dylib @executable_path/../Frameworks/libgfortran.5.dylib "$MACOS_BIN" 2>/dev/null || true
+
+# Fix binary's @rpath reference to libgtk-4-fortran (CRITICAL FIX)
+install_name_tool -change @rpath/libgtk-4-fortran.4.8.0.dylib @executable_path/../Frameworks/libgtk-4-fortran.4.8.0.dylib "$MACOS_BIN" 2>/dev/null || true
+install_name_tool -change /usr/local/lib/libgtk-4-fortran.4.8.0.dylib @executable_path/../Frameworks/libgtk-4-fortran.4.8.0.dylib "$MACOS_BIN" 2>/dev/null || true
 
 # Fix libgfortran's internal references (only if it exists and isn't fully fixed)
 if [ -f "$FRAMEWORKS/libgfortran.5.dylib" ]; then
