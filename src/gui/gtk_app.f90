@@ -256,7 +256,7 @@ contains
     ! Create Open Directory button with folder icon
     open_dir_btn = gtk_button_new()
     open_dir_btn_ptr = open_dir_btn  ! Store for later access (pulsing on empty tabs)
-    call gtk_button_set_icon_name(open_dir_btn, "folder-open"//c_null_char)
+    call gtk_button_set_icon_name(open_dir_btn, "folder"//c_null_char)
     call gtk_widget_set_tooltip_text(open_dir_btn, "Open Directory (Ctrl+O)"//c_null_char)
     call g_signal_connect(open_dir_btn, "clicked"//c_null_char, &
                            c_funloc(on_open_dir_clicked), c_null_ptr)

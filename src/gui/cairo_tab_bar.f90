@@ -283,13 +283,19 @@ contains
 
   ! Draw tab label text
   subroutine draw_tab_label(cr, x, y, width, height, text, is_dimmed)
+    use pango, only: pango_layout_set_width, pango_layout_set_ellipsize
     type(c_ptr), intent(in) :: cr
     integer, intent(in) :: x, y, width, height
     character(len=*), intent(in) :: text
     logical, intent(in) :: is_dimmed
     type(c_ptr) :: layout, font_desc
     integer(c_int), target :: text_width, text_height
+    integer(c_int) :: max_text_width
     real(c_double) :: text_x, text_y
+
+    ! Pango constants (not available in gtk-fortran bindings)
+    integer(c_int), parameter :: PANGO_SCALE = 1024
+    integer(c_int), parameter :: PANGO_ELLIPSIZE_END = 3
 
     ! Create pango layout
     layout = pango_cairo_create_layout(cr)
@@ -299,7 +305,14 @@ contains
     font_desc = pango_font_description_from_string("Sans 10"//c_null_char)
     call pango_layout_set_font_description(layout, font_desc)
 
-    ! Get text size
+    ! Calculate maximum width for text (leave room for close button and some padding)
+    max_text_width = width - CLOSE_BUTTON_SIZE - CLOSE_BUTTON_MARGIN - 10
+
+    ! Enable ellipsization to truncate long text
+    call pango_layout_set_width(layout, max_text_width * PANGO_SCALE)
+    call pango_layout_set_ellipsize(layout, PANGO_ELLIPSIZE_END)
+
+    ! Get text size (after ellipsization)
     call pango_layout_get_pixel_size(layout, c_loc(text_width), c_loc(text_height))
 
     ! Center text in tab (leaving room for close button)
