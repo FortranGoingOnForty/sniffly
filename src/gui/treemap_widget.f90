@@ -629,14 +629,16 @@ contains
   function on_query_tooltip(widget, x, y, keyboard_mode, tooltip, user_data) bind(c) result(show_tooltip)
     use types, only: file_node
     use treemap_renderer, only: find_node_at_position
+    use file_system, only: list_directory
     use iso_fortran_env, only: int64
     type(c_ptr), value :: widget, tooltip, user_data
     integer(c_int), value :: x, y, keyboard_mode
     integer(c_int) :: show_tooltip
     type(file_node), pointer :: current_view
-    integer :: hovered_index
+    integer :: hovered_index, item_count
     character(len=512) :: tooltip_text
     character(len=64) :: size_str
+    character(len=256), dimension(10000) :: dir_entries
     real(c_double) :: dx, dy
     real :: size_mb, size_gb
 
@@ -685,10 +687,22 @@ contains
 
       ! Build tooltip text
       if (current_view%children(hovered_index)%is_directory) then
+        ! Determine item count for directory
+        if (allocated(current_view%children(hovered_index)%children)) then
+          ! Directory has been scanned - use cached count
+          item_count = current_view%children(hovered_index)%num_children
+        else if (allocated(current_view%children(hovered_index)%path)) then
+          ! Directory not yet scanned - count entries on demand
+          item_count = list_directory(trim(current_view%children(hovered_index)%path), dir_entries, 10000)
+          if (item_count < 0) item_count = 0  ! Handle errors
+        else
+          item_count = 0
+        end if
+
         write(tooltip_text, '(A,A,A,A,A,I0,A)') &
           trim(current_view%children(hovered_index)%name), &
           char(10), 'Size: ', trim(size_str), &
-          char(10), current_view%children(hovered_index)%num_children, ' items'
+          char(10), item_count, ' items'
       else
         write(tooltip_text, '(A,A,A,A)') &
           trim(current_view%children(hovered_index)%name), &
